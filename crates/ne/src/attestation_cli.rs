@@ -38,9 +38,22 @@ pub struct VerifyPolicy {
     pub expected_host_cvm_measurement_hex: Option<String>,
     /// Required out-of-band Ed25519 public key for software evidence, as base64.
     pub expected_signer_b64: Option<String>,
-    /// Minimum accepted SNP reported TCB.
+    /// Minimum accepted SNP reported TCB, as a canonical decimal string.
+    ///
+    /// A string rather than a JSON number for the same reason as
+    /// `SealingTrustAnchor::SevSnp` — see [`ne_attestation::u64_str`]. This
+    /// file is authored by hand and by tooling: `jq` represents JSON numbers
+    /// as IEEE-754 doubles, so a production TCB floor written as a number is
+    /// rounded, and the rounding moves the floor **down**. That failure is
+    /// silent and it fails open.
+    #[serde(with = "ne_attestation::u64_str")]
     pub min_tcb: u64,
-    /// Required SNP guest-policy bits.
+    /// Required SNP guest-policy bits, as a canonical decimal string.
+    ///
+    /// Real guest-policy values sit far below 2^53 and were never at risk of
+    /// rounding. Encoded as a string only so one pin has one wire form across
+    /// every file the verifier reads.
+    #[serde(with = "ne_attestation::u64_str")]
     pub guest_policy: u64,
 }
 
@@ -230,8 +243,8 @@ mod tests {
             "expected_workspace_measurement_hex": null,
             "expected_host_cvm_measurement_hex": null,
             "expected_signer_b64": B64.encode(signer.as_bytes()),
-            "min_tcb": 0,
-            "guest_policy": 0
+            "min_tcb": "0",
+            "guest_policy": "0"
         })
     }
 

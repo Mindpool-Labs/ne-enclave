@@ -2,6 +2,74 @@
 
 ## Next release
 
+The SEV-SNP policy pins `min_tcb` and `guest_policy` are now JSON strings, in
+both `SealingTrustAnchor::SevSnp` and the `nee attestation verify` policy file.
+They serialize as `"min_tcb": "792633534417207304"` instead of
+`"min_tcb": 792633534417207304`. The string must be canonical: no leading `+`
+and no leading zeros. A JSON number is rejected rather than coerced, because a
+producer still emitting numbers is the lossy path this change removes.
+
+The reason is precision. `min_tcb` is compared against the raw 64-bit AMD
+`REPORTED_TCB` word, whose high byte is the microcode SVN, so production values
+exceed 2^53. Any consumer that parses JSON numbers as IEEE-754 doubles — every
+JavaScript and TypeScript client, and `jq` — silently rounds them. Two distinct
+pins 56 apart, `792633534417207304` and `792633534417207360`, both become
+`792633534417207300`. At that magnitude one unit in the last place spans 128,
+which covers the whole low byte of the packed word, so adjacent representable
+doubles are different security levels.
+
+That had two consequences, and this change closes both. A `SevSnp` snapshot
+sealed by a Rust producer could not be unsealed by a JavaScript one, because the
+two computed different policy hashes and therefore different DEK-wrap associated
+data. Worse, wherever the rounded hash serves as the policy identity — as it does
+in a KMS encryption context — a caller could present a TCB floor rolled back by
+up to one double-ULP bucket, still satisfy the binding, and have the gate then
+enforce the weaker floor. The `nee attestation verify` path had the same defect
+in the opposite direction: a rounded policy file moved the enforced floor *down*
+and failed open with no error.
+
+`guest_policy` was never at risk. It is enforced as a required-bits mask and real
+values sit around 2^18. It changes form only so that one pin has one wire
+encoding rather than two.
+
+## Do not hand-edit an existing seal
+
+**Re-encoding the pins in an existing `seal.json` destroys the wrapped DEK.**
+The policy hash is inside the AES-GCM associated data and inside the signed
+envelope, both fixed at seal time and not recomputable. Quoting the values by
+hand changes that hash, and the snapshot then fails with
+`seal signature does not verify` and `ciphertext failed authentication` — errors
+that read as tampering or disk corruption, not as a schema migration.
+
+There is no in-place migration. To move an existing SevSnp snapshot: unseal it
+with the prior release first, then re-seal it with this one. If the plaintext is
+gone and only the edited file remains, the data is unrecoverable.
+
+The practical blast radius is nil: `docs/CAPABILITIES.md` and
+`docs/THREAT-MODEL.md` both mark the SEV-SNP path synthetic-only and unclaimed
+on real silicon, so no production snapshot exists in the old format. That is
+what makes shipping without a migration defensible.
+
+## What must move in the same release
+
+Rust callers are unaffected at the type level — both fields remain `u64` and only
+the serialized form changes. Everything that crosses the JSON boundary must be
+updated together:
+
+- Any non-Rust client that emits or parses a `SealingPolicy`, including the
+  TypeScript control-plane Worker's schema and its independent
+  `policy_canonical_bytes` port. A JS fix must carry the value as a string end
+  to end; `Number`-based coercion re-introduces the rounding this change removes,
+  and no test in either repo would go red.
+- Any vendored `ne-enclave-wasm` artifact, which must be rebuilt — a stale
+  prebuilt still demands numbers.
+- Any tooling that authors a policy file with `jq`, which represents JSON numbers
+  as doubles.
+
+Cross-implementation parity fixtures currently cover the `Software` anchor only.
+A `SevSnp` fixture is what would have caught this divergence, and it is still
+missing on both sides.
+
 Workspace creation now identifies managed images by content digest. The request fields
 `kernel_image_path` and `rootfs_image_path` (and the TypeScript spellings
 `kernelImagePath` and `rootfsImagePath`) have been removed. Use `kernel_sha256` and

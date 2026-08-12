@@ -28,6 +28,62 @@ pub use tpm_attest::{TpmAttest, parse_tpm2b_attest};
 
 use serde::{Deserialize, Serialize};
 
+/// Canonical string encoding for a `u64` that crosses a JSON boundary.
+///
+/// # Why the SEV-SNP pins are strings
+///
+/// [`TrustAnchor::SevSnp::min_tcb`] is compared against the raw 64-bit AMD
+/// `REPORTED_TCB` word, whose high byte is the microcode SVN, so production
+/// values exceed 2^53. Any consumer that parses JSON numbers as IEEE-754
+/// doubles — every JS and TS client — silently rounds them.
+/// At that magnitude one unit in the last place spans 128, which covers the
+/// whole low byte of the packed word, so two adjacent representable doubles
+/// are *different security levels*. Encoding as a string removes the double
+/// from the path for every consumer, in every language.
+///
+/// # Why the encoding is canonical and not merely lossless
+///
+/// `u64::from_str` accepts a leading `+` and leading zeros, so `"+5"`, `"05"`
+/// and `"5"` all parse to the same integer. Within Rust that is harmless,
+/// because the policy hash is computed over the *re-serialized* struct, which
+/// normalises them. It is not harmless across implementations: a peer that
+/// hashes the bytes it received — which is what `JSON.stringify` over a parsed
+/// object does — derives a different policy identity for the same value, and
+/// a policy hash is exactly the thing that must not have two spellings.
+///
+/// Deserialization therefore accepts only the canonical form: no sign, no
+/// leading zeros. A JSON number is rejected outright rather than coerced,
+/// because a producer still emitting numbers is the lossy path this encoding
+/// exists to remove, and failing loudly is the point of a breaking change.
+pub mod u64_str {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize a `u64` as its canonical decimal string.
+    #[allow(clippy::trivially_copy_pass_by_ref)] // serde's `with` signature
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+
+    /// Parse a canonical decimal string into a `u64`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a JSON number, on a non-canonical spelling (leading `+` or
+    /// leading zeros), and on anything `u64::from_str` rejects.
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        let s = String::deserialize(d)?;
+        let v: u64 = s.parse().map_err(serde::de::Error::custom)?;
+        if v.to_string() == s {
+            Ok(v)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "expected a canonical decimal string with no sign and no \
+                 leading zeros, got {s:?}"
+            )))
+        }
+    }
+}
+
 /// Which platform produced the evidence. Serialized as a stable
 /// `snake_case` string so it survives the proto boundary and so an
 /// attestation policy can branch on it.
