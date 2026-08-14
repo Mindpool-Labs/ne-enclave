@@ -7,7 +7,7 @@
 use ne_attestation::{Measurement, ProviderType};
 use serde::{Deserialize, Serialize};
 
-use crate::{SealError, b64_32, b64_vec, b64_vec_option};
+use crate::{SealError, b64_32, b64_vec, b64_vec_option, u64_str};
 
 /// Schema version of the seal artifact.
 pub const SEAL_VERSION: u32 = 1;
@@ -53,8 +53,23 @@ pub enum SealingTrustAnchor {
         #[serde(with = "b64_vec_option")]
         expected_host_cvm_meas: Option<Vec<u8>>,
         /// Minimum accepted TCB version (guest firmware/build).
+        ///
+        /// String-encoded on the wire. This is compared against the raw
+        /// 64-bit `REPORTED_TCB` word, whose high byte is the microcode SVN,
+        /// so real values exceed 2^53 and a JSON number would lose precision
+        /// in any IEEE-754 consumer. At that magnitude one unit in the last
+        /// place spans 128, which covers the whole low byte, so rounding
+        /// moves the enforced floor. See [`crate::u64_str`].
+        #[serde(with = "u64_str")]
         min_tcb: u64,
         /// SEV-SNP guest policy bitmap the launch demanded.
+        ///
+        /// String-encoded for consistency with `min_tcb`, **not** because it
+        /// was ever at risk. It is enforced as a required-bits mask and real
+        /// values occupy the low ~21 bits, around 2^18, so no double ever
+        /// rounded one. Both pins share a wire form so there is one encoding
+        /// to reason about rather than two.
+        #[serde(with = "u64_str")]
         guest_policy: u64,
     },
 }
@@ -192,5 +207,104 @@ mod tests {
         let p = sample_policy();
         let v = serde_json::to_value(&p.trust_anchor).unwrap();
         assert_eq!(v["kind"], "software");
+    }
+
+    /// A `SevSnp` anchor's 64-bit pins survive the wire exactly, and land as
+    /// JSON strings so no IEEE-754 consumer can round them.
+    ///
+    /// The two `min_tcb` values below are 56 apart and both render as
+    /// `792633534417207300` when passed through a double. Before this
+    /// encoding they shared one canonical form, and therefore one policy
+    /// hash, which let a caller present the lower TCB floor against a binding
+    /// computed for the higher one.
+    #[test]
+    fn sev_snp_u64_pins_are_string_encoded_and_survive_round_trip() {
+        let anchor = |min_tcb| SealingTrustAnchor::SevSnp {
+            amd_product_root_der: vec![0xAA, 0xBB],
+            expected_host_cvm_meas: None,
+            min_tcb,
+            guest_policy: 15_787_591_440_497_344_516,
+        };
+
+        let a = anchor(792_633_534_417_207_304);
+        let json = serde_json::to_string(&a).unwrap();
+
+        assert!(
+            json.contains("\"min_tcb\":\"792633534417207304\""),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"guest_policy\":\"15787591440497344516\""),
+            "{json}"
+        );
+
+        let back: SealingTrustAnchor = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
+
+        // The pair that collided as doubles now has distinct canonical forms.
+        let b = anchor(792_633_534_417_207_360);
+        assert_ne!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap(),
+        );
+    }
+
+    /// The `SevSnp` policy hash separates two pins that a double conflates.
+    ///
+    /// This is the property the control plane's AAD binding and the KMS
+    /// encryption context both rest on.
+    #[test]
+    fn sev_snp_policy_hash_separates_double_colliding_tcb_pins() {
+        let policy = |min_tcb| SealingPolicy {
+            accept_provider_types: vec![ProviderType::SevSnp],
+            freshness_seconds: 300,
+            trust_anchor: SealingTrustAnchor::SevSnp {
+                amd_product_root_der: vec![0xAA, 0xBB],
+                expected_host_cvm_meas: None,
+                min_tcb,
+                guest_policy: 0x0003_0000,
+            },
+            expected_measurement: None,
+        };
+
+        assert_ne!(
+            crate::kek::policy_hash(&policy(792_633_534_417_207_304)),
+            crate::kek::policy_hash(&policy(792_633_534_417_207_360)),
+        );
+    }
+
+    /// A pre-change seal that encodes the pins as JSON numbers is rejected,
+    /// not silently reinterpreted.
+    ///
+    /// The assertion pins the error *message*, not merely `is_err()`. This
+    /// type has no `deny_unknown_fields`, so renaming `min_tcb` would turn the
+    /// literal's key into a silently ignored unknown field, leave the real
+    /// field missing, and still produce an error — the test would stay green
+    /// while exercising nothing. For a tripwire whose whole job is "a numeric
+    /// pin must never be accepted again", the reason has to be checked.
+    #[test]
+    fn sev_snp_rejects_numeric_u64_pins_from_an_older_seal() {
+        let legacy = r#"{"kind":"sev_snp","amd_product_root_der":"qrs=",
+            "expected_host_cvm_meas":null,"min_tcb":792633534417207304,
+            "guest_policy":"196608"}"#;
+
+        let err = serde_json::from_str::<SealingTrustAnchor>(legacy).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type: integer") && msg.contains("expected a string"),
+            "rejected for the wrong reason: {msg}"
+        );
+
+        // Control: the identical literal with the pin quoted parses, so the
+        // rejection above is caused by the number and by nothing else.
+        let fixed = legacy.replace("792633534417207304", "\"792633534417207304\"");
+        let ok = serde_json::from_str::<SealingTrustAnchor>(&fixed).unwrap();
+        assert!(matches!(
+            ok,
+            SealingTrustAnchor::SevSnp {
+                min_tcb: 792_633_534_417_207_304,
+                ..
+            }
+        ));
     }
 }

@@ -535,8 +535,8 @@ jobs:
             expected_workspace_measurement_hex: null,
             expected_host_cvm_measurement_hex: null,
             expected_signer_b64: null,
-            min_tcb: 0,
-            guest_policy: 0
+            min_tcb: "0",
+            guest_policy: "0"
           }' > policy.json
           staging/nee-x86_64-unknown-linux-musl attestation verify \
             --evidence evidence.json \

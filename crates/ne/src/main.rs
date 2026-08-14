@@ -851,8 +851,8 @@ mod attestation_output_tests {
                 "expected_workspace_measurement_hex": null,
                 "expected_host_cvm_measurement_hex": null,
                 "expected_signer_b64": base64::prelude::BASE64_STANDARD.encode(signer.as_bytes()),
-                "min_tcb": 0,
-                "guest_policy": 0
+                "min_tcb": "0",
+                "guest_policy": "0"
             }))
             .expect("policy JSON"),
         )
