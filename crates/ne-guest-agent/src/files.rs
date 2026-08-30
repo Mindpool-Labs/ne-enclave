@@ -24,7 +24,7 @@
 //! Each operation maps its failure mode to an [`ne_protocol::guest::GuestErrorKind`]
 //! variant via the [`FileError`] enum.
 //!
-//! # Phase 1 P0 scope
+//! # Current scope
 //!
 //! - Inline bodies; the 10 MiB cap is enforced by the caller before
 //!   it reaches the agent.

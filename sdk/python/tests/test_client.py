@@ -550,7 +550,7 @@ def test_create_workspace_opts_into_privacy_router(fake_server) -> None:
     """``enable_privacy_router=True`` must surface as a populated
     ``privacy_router`` nested message — the supervisor branches on
     field presence to decide whether to spawn the per-workspace
-    router. The message is empty in Phase 1 P0; future fields land
+    router. The message is empty today; future fields can be added
     additively without an SDK migration."""
     servicer, target = fake_server
     seen = {}

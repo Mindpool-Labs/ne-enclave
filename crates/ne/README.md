@@ -2,8 +2,8 @@
 
 **NeuronEdge Enclave** — the single fused runtime binary (`nee`) for Confidential Agent
 Execution Infrastructure: a hardware-attested execution boundary for autonomous-agent work on
-Linux + KVM + Firecracker. The runtime is Apache-2.0; the BSL-1.1 control plane lives in a
-separate repository.
+Linux + KVM + Firecracker. The runtime is Apache-2.0. Optional external integrations use
+`ne-protocol` compatibility types.
 
 `nee` is one static musl binary that carries every runtime subcommand:
 

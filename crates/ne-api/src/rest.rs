@@ -4,7 +4,7 @@
 
 //! REST/JSON gateway over [`crate::core::RuntimeCore`].
 //!
-//! Maps the seven Phase 1 P0 RPCs to the ARCH §7.3 HTTP paths. Shares
+//! Maps the runtime RPCs to HTTP paths. Shares
 //! the supervisor IPC path with the gRPC server via `RuntimeCore`.
 
 use std::sync::Arc;
@@ -546,7 +546,7 @@ async fn list_events(
 }
 
 /// `POST /v1/workspaces/{id}/pause` and `resume` response body. NOTE: pause/
-/// resume are DEFERRED (wedge-6.8) and currently always return an error, so
+/// resume are DEFERRED and currently always return an error, so
 /// this success shape is unused for now; retained for when the API re-activates.
 #[derive(Serialize)]
 struct WorkspaceIdResponse {

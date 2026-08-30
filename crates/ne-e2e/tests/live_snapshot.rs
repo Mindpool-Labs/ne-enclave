@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge: live-state snapshot of a running VM (KVM-gated).
+//! Live-state snapshot of a running VM (KVM-gated).
 //!
 //! Proves: a `live` snapshot of a RUNNING workspace leaves the source live +
 //! vsock-reachable (a command runs on it AFTER the snapshot, via its NEW

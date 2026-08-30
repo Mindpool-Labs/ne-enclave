@@ -162,7 +162,7 @@ impl SnapshotManifest {
             obj.remove("signature_b64");
             let mut sorted: std::collections::BTreeMap<String, serde_json::Value> =
                 obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            // Domain tag (audit S5-F4). `ctx` sorts deterministically with the
+            // Domain tag. `ctx` sorts deterministically with the
             // rest of the top-level keys.
             sorted.insert(
                 "ctx".to_string(),
@@ -201,7 +201,7 @@ pub fn verify_manifest_signature(m: &SnapshotManifest) -> Result<(), VerifyError
 /// `expected_signer` or verification fails with [`VerifyError::UntrustedSigner`]
 /// before any signature check. This is the authenticity-bearing verifier — it
 /// proves the artifact was produced by the holder of `expected_signer`, closing
-/// the self-signed forgery class (mirrors the wedge-7.3 attestation `verify()`
+/// the self-signed forgery class (mirrors the attestation `verify()`
 /// trust-anchor discipline). Does NOT touch the filesystem.
 pub fn verify_manifest_signature_pinned(
     m: &SnapshotManifest,

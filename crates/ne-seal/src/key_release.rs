@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! The runtime↔control-plane key-release contract (design §7).
+//! The runtime↔control-plane key-release contract.
 //!
 //! [`SoftwareFallbackKeyRelease`] unwraps the DEK locally using the HKDF KEK
 //! (caller MUST have already produced an Open gate). The control-plane path is
-//! a stub returning [`SealError::NotImplemented`]; the real client lands in the
-//! separate BSL control-plane repo.
+//! the HTTPS client is implemented in [`crate::key_release_cp`]. This module
+//! retains a placeholder that returns [`SealError::NotImplemented`].
 
 use std::future::Future;
 use std::pin::Pin;
@@ -78,8 +78,7 @@ impl KeyRelease for SoftwareFallbackKeyRelease {
     }
 }
 
-/// Control-plane key-release contract. THIS WEDGE ships only the trait + the
-/// `NotImplemented` stub.
+/// Control-plane key-release contract.
 pub trait ControlPlaneKeyRelease: Send + Sync + std::fmt::Debug {
     /// Request the control plane release the wrapped DEK for `seal`, attested
     /// by `evidence`.
@@ -92,8 +91,7 @@ pub trait ControlPlaneKeyRelease: Send + Sync + std::fmt::Debug {
 }
 
 /// Placeholder control-plane client that always returns
-/// [`SealError::NotImplemented`]; the real client lands in the separate BSL
-/// control-plane repo.
+/// [`SealError::NotImplemented`]. Use `key_release_cp` for HTTPS transport.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NotImplementedControlPlaneClient;
 

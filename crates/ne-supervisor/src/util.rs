@@ -34,6 +34,7 @@ pub(crate) async fn read_capped_line<R: AsyncBufRead + Unpin>(
 /// usize) so a literal `0` cannot silently install a fail-closed cap that bricks
 /// vsock RPC / discards all exec output — parity with the timeout knobs
 /// ([`parse_ceiling`]).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn parse_positive_or<T>(raw: Option<String>, default: T) -> T
 where
     T: std::str::FromStr + PartialOrd + Default,
@@ -45,6 +46,7 @@ where
 
 /// Clamp a client-supplied `timeout_ms` so 0 ("no bound") or an
 /// over-ceiling value resolves to `ceiling`. Guarantees a wall-clock deadline.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn clamp_timeout_ms(requested: u32, ceiling: u32) -> u32 {
     if requested == 0 || requested > ceiling {
         ceiling
@@ -57,6 +59,7 @@ pub(crate) fn clamp_timeout_ms(requested: u32, ceiling: u32) -> u32 {
 /// zero value falls back to the 1-hour default — 0 is rejected because a zero
 /// ceiling would make `clamp_timeout_ms` return 0 for every input, and the
 /// call sites treat 0 as "no bound" (reopening the unbounded-wait hole).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_ceiling(raw: Option<String>) -> u32 {
     raw.and_then(|v| v.parse().ok())
         .filter(|&v| v > 0)
@@ -66,6 +69,7 @@ fn parse_ceiling(raw: Option<String>) -> u32 {
 /// Ceiling that any client `timeout_ms` is clamped to. Default 1 hour.
 /// The env override rejects 0 (falls back to the default) — see
 /// [`parse_ceiling`].
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) static MAX_EXEC_TIMEOUT_MS: LazyLock<u32> =
     LazyLock::new(|| parse_ceiling(std::env::var("NE_MAX_EXEC_TIMEOUT_MS").ok()));
 

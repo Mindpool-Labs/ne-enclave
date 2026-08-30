@@ -2,34 +2,35 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! e2e: SEV-SNP hardware-rooted key release on a real confidential host.
+//! e2e: SEV-SNP real-silicon evidence validation against an external
+//! non-production test endpoint.
 //!
 //! HOST-GATED: requires `/dev/sev-guest` + SEV-SNP silicon (Azure `DCasv5`) AND
-//! a live control-plane Worker reachable from the CVM (`NE_CP_KEY_RELEASE_ENDPOINT`
-//! + `NE_CP_API_KEY`).
+//! an external test endpoint reachable from the CVM with configured TLS files.
 //!
 //! NOT claimed to pass until exercised on provisioned hardware — `#[ignore]`
 //! everywhere without a CVM.
 //!
-//! This is the real-silicon round-trip for the hardware-rooted key-release claim
-//! (PRD §50 / ARCH §6.4): a genuine `/dev/sev-guest` `SNP_GET_REPORT` + a
-//! VCEK+ASK chain fetched from the real AMD KDS, validated to the genuine baked
-//! AMD Milan ARK by the CP's server-side WASM gate, which releases the DEK
-//! (SoftwareKms backend). The full runtime→CP→KEK→decrypt restore trust path.
+//! This validates real-silicon evidence against an external non-production test
+//! endpoint: a genuine `/dev/sev-guest` `SNP_GET_REPORT` plus a VCEK+ASK chain
+//! fetched from the AMD KDS and validated to the baked AMD Milan ARK. It does
+//! not validate or claim production hardware-rooted key release.
 //!
-//! No nested Firecracker microVM is booted (Model-A nested bring-up is a separate
-//! wedge): the supervisor's attestation + seal/unseal path is exercised directly.
+//! No nested Firecracker microVM is booted: the supervisor's attestation and
+//! seal/unseal path are exercised directly.
 //!
-//! Run manually on a provisioned SEV-SNP host (Worker already deployed live):
+//! Run manually on a provisioned SEV-SNP host with a configured test endpoint:
 //! ```sh
-//! NE_CP_KEY_RELEASE_ENDPOINT=https://<worker>/v1 \
-//! NE_CP_API_KEY=<key> \
+//! NE_CP_KEY_RELEASE_ENDPOINT=https://<endpoint>/v1 \
+//! NE_CP_TLS_CA_CERT=<ca-pem-path> \
+//! NE_CP_TLS_CLIENT_CERT=<client-cert-pem-path> \
+//! NE_CP_TLS_CLIENT_KEY=<client-key-pem-path> \
 //! cargo test -p ne-e2e --test sev_snp -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! **Claim discipline:** until this passes on a named DCasv5 pinned to the real
-//! Milan ARK, the hardware-rooted key-release claim stays UNCLAIMED. The Task 6
-//! bring-up report records the genuine fingerprints + the pass.
+//! A pass on a named DCasv5 pinned to the real Milan ARK validates the evidence
+//! path and emits genuine fingerprints. It does not select or make a production
+//! key-release backend ready.
 
 #![cfg(target_os = "linux")]
 
@@ -46,7 +47,7 @@ use ne_attestation::{
     vcek::{AMD_MILAN_ARK_DER, AmdRootCert, KdsVcekFetcher, VcekCache, VcekFetcher},
 };
 use ne_protocol::snapshot::{GuestIdentity, MANIFEST_VERSION, SnapshotManifest};
-use ne_seal::key_release_cp::ControlPlaneKeyReleaseClient;
+use ne_seal::key_release_cp::{ControlPlaneKeyReleaseClient, ControlPlaneTlsFiles};
 use ne_seal::orchestration::{seal_artifacts, unseal_artifacts};
 use ne_seal::types::{KekProvider, SealingPolicy, SealingTrustAnchor};
 use sha2::Digest;
@@ -57,21 +58,28 @@ fn wall_now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// `#[ignore]` real-silicon e2e: the full hardware-rooted key-release round-trip.
+/// `#[ignore]` real-silicon evidence validation against a test endpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires /dev/sev-guest + SEV-SNP silicon + a live CP Worker"]
+#[ignore = "requires /dev/sev-guest + SEV-SNP silicon + an external test endpoint"]
 async fn sev_snp_silicon_key_release_round_trip() {
     if !Path::new("/dev/sev-guest").exists() {
         eprintln!("skip: no /dev/sev-guest — run on a provisioned SEV-SNP host");
         return;
     }
-    let (endpoint, api_key) = match (
-        std::env::var("NE_CP_KEY_RELEASE_ENDPOINT"),
-        std::env::var("NE_CP_API_KEY"),
-    ) {
-        (Ok(e), Ok(k)) => (e, k),
-        _ => panic!("NE_CP_KEY_RELEASE_ENDPOINT + NE_CP_API_KEY must point at the live Worker"),
+    let endpoint = std::env::var("NE_CP_KEY_RELEASE_ENDPOINT")
+        .expect("NE_CP_KEY_RELEASE_ENDPOINT must point at a test endpoint");
+    let tls = ControlPlaneTlsFiles {
+        ca_cert: std::env::var("NE_CP_TLS_CA_CERT")
+            .expect("NE_CP_TLS_CA_CERT must name a CA PEM file")
+            .into(),
+        client_cert: std::env::var("NE_CP_TLS_CLIENT_CERT")
+            .expect("NE_CP_TLS_CLIENT_CERT must name a client certificate PEM file")
+            .into(),
+        client_key: std::env::var("NE_CP_TLS_CLIENT_KEY")
+            .expect("NE_CP_TLS_CLIENT_KEY must name a client key PEM file")
+            .into(),
     };
+    let api_key = std::env::var("NE_CP_API_KEY").ok();
 
     // --- SEV-SNP provider: real ioctl report source + real KDS VCEK/ASK fetch ---
     // Typed as `Arc<dyn AttestationProvider>` so it coerces to the `&dyn
@@ -80,10 +88,11 @@ async fn sev_snp_silicon_key_release_round_trip() {
     let vcek: Arc<dyn VcekFetcher> = Arc::new(VcekCache::new(KdsVcekFetcher::new()));
     let provider: Arc<dyn AttestationProvider> = Arc::new(SevSnpProvider::new(source, vcek));
 
-    // --- CP client (live Worker, SoftwareKms backend) ---
+    // --- External test client ---
     // Implements BOTH `CpWrapClient` (seal-time DEK wrap) and
     // `ControlPlaneKeyRelease` (restore-time DEK release).
-    let cp = ControlPlaneKeyReleaseClient::new(endpoint, api_key, Arc::new(wall_now));
+    let cp = ControlPlaneKeyReleaseClient::new_mtls(endpoint, api_key, tls, Arc::new(wall_now))
+        .expect("mTLS client configuration");
     let cp_wrap: Option<&dyn ne_seal::key_release_cp::CpWrapClient> = Some(&cp);
 
     // --- Ed25519 host key for seal.json + manifest.json signing (self-signed
@@ -160,7 +169,7 @@ async fn sev_snp_silicon_key_release_round_trip() {
         expected_measurement: None,
     };
 
-    // --- Seal (CP wrap-dek, SoftwareKms) ---
+    // --- Seal via the external test client ---
     let envelope = seal_artifacts(
         &snap,
         &manifest,
@@ -179,7 +188,7 @@ async fn sev_snp_silicon_key_release_round_trip() {
     // --- Generate genuine SEV-SNP evidence (real ioctl) for fingerprinting ---
     // (The authoritative gate evidence is minted INSIDE `unseal_artifacts` with
     // its own fresh nonce; this call exists only to emit the genuine
-    // chip_id / REPORTED_TCB / chain fingerprints for the bring-up report.)
+    // chip_id / REPORTED_TCB / chain fingerprints for evidence-validation output.)
     let nonce_bytes = vec![0xABu8; 32];
     let nonce = Nonce::new(nonce_bytes).expect("nonce");
     let req = EvidenceRequest {
@@ -192,7 +201,7 @@ async fn sev_snp_silicon_key_release_round_trip() {
         .expect("generate SEV-SNP evidence");
     assert_eq!(evidence.provider_type, ProviderType::SevSnp);
 
-    // --- Emit the genuine fingerprints for the bring-up report (public, non-secret) ---
+    // --- Emit genuine public, non-secret evidence fingerprints ---
     print_fingerprints(&evidence, &envelope);
 
     // --- Unseal (the restore trust path): fail-fast local gate -> authoritative
@@ -229,7 +238,8 @@ async fn sev_snp_silicon_key_release_round_trip() {
     );
 
     eprintln!(
-        "sev_snp_silicon_key_release_round_trip: PASSED (hardware-rooted key release verified)"
+        "sev_snp_silicon_key_release_round_trip: PASSED (real-silicon evidence \
+         validated through an external non-production test endpoint)"
     );
 }
 
@@ -242,7 +252,7 @@ fn hex_sha256(b: &[u8]) -> String {
 }
 
 /// Print the genuine chip_id, REPORTED_TCB, VCEK+ASK chain + ARK SHA-256 —
-/// captured into the Task 6 bring-up report. Public, non-secret values.
+/// emitted by this test. Public, non-secret values.
 fn print_fingerprints(
     evidence: &ne_attestation::Evidence,
     envelope: &ne_seal::types::SealEnvelope,
@@ -265,7 +275,7 @@ fn print_fingerprints(
     let report_hash = hex_sha256(report);
     let chain_hash = hex_sha256(vcek_cert_chain);
     let ark_hash = hex_sha256(AMD_MILAN_ARK_DER);
-    eprintln!("=== DCasv5 SEV-SNP bring-up fingerprints ===");
+    eprintln!("=== DCasv5 SEV-SNP validation fingerprints ===");
     eprintln!("chip_id (hex, 64B): {}", hex::encode(chip_id));
     eprintln!("REPORTED_TCB (u64): {reported_tcb} (0x{reported_tcb:016x})");
     eprintln!("firmware report SHA-256: {report_hash}");

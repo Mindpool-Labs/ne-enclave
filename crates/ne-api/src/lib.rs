@@ -4,18 +4,18 @@
 
 //! NeuronEdge Enclave Runtime API daemon — gRPC mediation layer.
 //!
-//! Per ARCH §4.1 this is the unprivileged front door SDK callers
+//! This is the unprivileged front door SDK callers
 //! reach. It validates requests, applies per-tenant rate limits
-//! (Phase 1 P1), and relays the typed operation to
+//! (in a later release), and relays the typed operation to
 //! `ne-supervisor` over its NDJSON unix socket
 //! (`SupervisorRequest` / `SupervisorResponse` in `ne_protocol`).
 //!
-//! Phase 1 P0 surface: `Ping`, `CreateWorkspace`, `DestroyWorkspace`,
+//! Current API surface: `Ping`, `CreateWorkspace`, `DestroyWorkspace`,
 //! `ExecuteCommand`, `WriteFile`, `ReadFile`, `ListEvents` — exposed
 //! over both gRPC (`crate::server`) and REST/JSON (`crate::rest`),
 //! sharing one transport-agnostic core (`crate::core`). Snapshots,
 //! fork, attestation, and streaming (`ExecuteCommand` server-stream,
-//! events SSE) are Phase 1 P1.
+//! events SSE) are planned for a later compatible release.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]

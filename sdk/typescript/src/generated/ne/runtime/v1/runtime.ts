@@ -372,7 +372,7 @@ export interface CreateWorkspaceRequest {
 /**
  * Per-workspace network policy.
  *
- * Phase 1 P0 second cut: deny-by-default FORWARD chain populated by
+ * Current implementation: deny-by-default FORWARD chain populated by
  * `allow_cidrs`. Future iterations add port allowlists, hostname
  * allowlists, and DNS overrides via additional fields — repeated /
  * optional keep the wire shape additive.
@@ -408,10 +408,10 @@ export interface NetworkConfig {
    * (HTTP body PII scanning). The supervisor spawns one
    * ne-privacy-router per workspace inside the netns and
    * installs iptables DNAT to redirect TCP/80 egress to it. The
-   * PII policy itself is host-global in Phase 1 P0 (operator-set
+   * PII policy itself is host-global (operator-set
    * via supervisor CLI) — the message stays empty for now and will
    * grow per-workspace overrides (e.g. an inline policy) in
-   * Phase 2 without breaking existing clients.
+   * a later compatible extension without breaking existing clients.
    */
   privacyRouter?:
     | PrivacyRouterConfig
@@ -427,9 +427,9 @@ export interface NetworkConfig {
 /**
  * Per-workspace privacy-router opt-in marker.
  *
- * Empty in Phase 1 P0: presence is the opt-in signal; the operator-
+ * Empty today: presence is the opt-in signal; the operator-
  * set global policy applies. Kept as a message (rather than a bool)
- * so Phase 2 can add fields (`policy`, `redirect_ports`, etc.)
+ * so later API versions can add fields (`policy`, `redirect_ports`, etc.)
  * without an SDK migration.
  */
 export interface PrivacyRouterConfig {
@@ -526,17 +526,17 @@ export interface ExecuteCommandRequest {
 
 export interface ExecuteCommandResponse {
   workspaceId: string;
-  /** Captured stdout (lossy UTF-8; full buffer in Phase 1 P0). */
+  /** Captured stdout (lossy UTF-8; full buffer today). */
   stdout: string;
   /** Captured stderr (same conversion as stdout). */
   stderr: string;
-  /** Process exit code (-1 if terminated by signal in Phase 1 P0). */
+  /** Process exit code (-1 if terminated by signal today). */
   exitCode: number;
   /** Wall-clock duration the command ran for, milliseconds. */
   elapsedMs: number;
   /**
    * True if the guest truncated stdout or stderr at its per-stream cap
-   * (audit S3-F2). The captured bytes are still valid; only the tail
+   * The captured bytes are still valid; only the tail
    * was dropped.
    */
   truncated: boolean;
@@ -6068,8 +6068,8 @@ export const RuntimeService = {
    * Run one command inside a workspace. The API daemon relays the
    * call through the supervisor, which opens a vsock connection to
    * the guest agent, asks it to spawn the command, and returns the
-   * captured output. Phase 1 P0 is unary; server-streaming with
-   * stdout/stderr chunks (PRD FR-4.5) lands in P1.
+   * captured output. This operation is unary; a later API version can add
+   * server-streaming stdout and stderr chunks.
    */
   executeCommand: {
     path: "/ne.runtime.v1.Runtime/ExecuteCommand" as const,
@@ -6084,7 +6084,7 @@ export const RuntimeService = {
   },
   /**
    * Read entries from the supervisor's signed audit event log
-   * (per-event Ed25519 + Merkle chain). Per FR-11.3 these events
+   * (per-event Ed25519 + Merkle chain). These events
    * are what the control plane eventually aggregates into its
    * tamper-evident store for compliance evidence packaging.
    */
@@ -6117,7 +6117,7 @@ export const RuntimeService = {
   },
   /**
    * Pause a running workspace (freeze vCPUs in place).
-   * DEFERRED (wedge-6.8): unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
+   * DEFERRED: unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
    */
   pauseWorkspace: {
     path: "/ne.runtime.v1.Runtime/PauseWorkspace" as const,
@@ -6132,7 +6132,7 @@ export const RuntimeService = {
   },
   /**
    * Resume a previously paused workspace.
-   * DEFERRED (wedge-6.8): unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
+   * DEFERRED: unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
    */
   resumeWorkspace: {
     path: "/ne.runtime.v1.Runtime/ResumeWorkspace" as const,
@@ -6269,13 +6269,13 @@ export interface RuntimeServer extends UntypedServiceImplementation {
    * Run one command inside a workspace. The API daemon relays the
    * call through the supervisor, which opens a vsock connection to
    * the guest agent, asks it to spawn the command, and returns the
-   * captured output. Phase 1 P0 is unary; server-streaming with
-   * stdout/stderr chunks (PRD FR-4.5) lands in P1.
+   * captured output. This operation is unary; a later API version can add
+   * server-streaming stdout and stderr chunks.
    */
   executeCommand: handleUnaryCall<ExecuteCommandRequest, ExecuteCommandResponse>;
   /**
    * Read entries from the supervisor's signed audit event log
-   * (per-event Ed25519 + Merkle chain). Per FR-11.3 these events
+   * (per-event Ed25519 + Merkle chain). These events
    * are what the control plane eventually aggregates into its
    * tamper-evident store for compliance evidence packaging.
    */
@@ -6284,12 +6284,12 @@ export interface RuntimeServer extends UntypedServiceImplementation {
   readFile: handleUnaryCall<ReadFileRequest, ReadFileResponse>;
   /**
    * Pause a running workspace (freeze vCPUs in place).
-   * DEFERRED (wedge-6.8): unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
+   * DEFERRED: unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
    */
   pauseWorkspace: handleUnaryCall<PauseWorkspaceRequest, PauseWorkspaceResponse>;
   /**
    * Resume a previously paused workspace.
-   * DEFERRED (wedge-6.8): unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
+   * DEFERRED: unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
    */
   resumeWorkspace: handleUnaryCall<ResumeWorkspaceRequest, ResumeWorkspaceResponse>;
   /** Snapshot a paused workspace into a reusable artifact. */
@@ -6403,8 +6403,8 @@ export interface RuntimeClient extends Client {
    * Run one command inside a workspace. The API daemon relays the
    * call through the supervisor, which opens a vsock connection to
    * the guest agent, asks it to spawn the command, and returns the
-   * captured output. Phase 1 P0 is unary; server-streaming with
-   * stdout/stderr chunks (PRD FR-4.5) lands in P1.
+   * captured output. This operation is unary; a later API version can add
+   * server-streaming stdout and stderr chunks.
    */
   executeCommand(
     request: ExecuteCommandRequest,
@@ -6423,7 +6423,7 @@ export interface RuntimeClient extends Client {
   ): ClientUnaryCall;
   /**
    * Read entries from the supervisor's signed audit event log
-   * (per-event Ed25519 + Merkle chain). Per FR-11.3 these events
+   * (per-event Ed25519 + Merkle chain). These events
    * are what the control plane eventually aggregates into its
    * tamper-evident store for compliance evidence packaging.
    */
@@ -6474,7 +6474,7 @@ export interface RuntimeClient extends Client {
   ): ClientUnaryCall;
   /**
    * Pause a running workspace (freeze vCPUs in place).
-   * DEFERRED (wedge-6.8): unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
+   * DEFERRED: unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
    */
   pauseWorkspace(
     request: PauseWorkspaceRequest,
@@ -6493,7 +6493,7 @@ export interface RuntimeClient extends Client {
   ): ClientUnaryCall;
   /**
    * Resume a previously paused workspace.
-   * DEFERRED (wedge-6.8): unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
+   * DEFERRED: unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
    */
   resumeWorkspace(
     request: ResumeWorkspaceRequest,

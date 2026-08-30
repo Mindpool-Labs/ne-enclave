@@ -93,7 +93,7 @@ pub mod u64_str {
 pub enum ProviderType {
     /// Ed25519-rooted software fallback. NOT firmware-rooted.
     Software,
-    /// AMD SEV-SNP firmware-rooted (host CVM attestation, ARCH §884 Model A).
+    /// AMD SEV-SNP firmware-rooted host-CVM attestation.
     SevSnp,
 }
 
@@ -103,7 +103,7 @@ pub struct Measurement(pub [u8; 32]);
 
 /// Host-CVM launch digest (MEAS) from the SEV-SNP report — 48 bytes.
 /// Deliberately a distinct type from the 32-byte per-workspace [`Measurement`]
-/// so the two cannot be conflated (spec §3, risk R3).
+/// so the two cannot be conflated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CvmMeasurement(#[serde(with = "b64_48")] pub [u8; 48]);
 
@@ -289,7 +289,7 @@ pub enum AttestationError {
     ReportFetch,
     /// The `/dev/sev-guest` `SNP_GET_REPORT` ioctl returned an error, with the
     /// firmware/VMM diagnostic detail (`exitinfo2` + the ioctl `errno`) preserved
-    /// — the primary silicon bring-up diagnostic. Carries the detail so the crate
+    /// — the primary silicon-evidence diagnostic. Carries the detail so the crate
     /// stays logger-free; callers (supervisor / e2e) format/log it.
     #[error(
         "SNP_GET_REPORT ioctl failed (errno {errno}, fw_error {fw_error:#x}, vmm_error {vmm_error:#x})"
@@ -308,7 +308,7 @@ pub enum AttestationError {
     VcekFetch,
     /// A host-binary shell-out (the Azure vTPM report source: `tpm2`/`dd`)
     /// failed or produced no usable bytes. Carries the program alias + trimmed
-    /// stderr so the supervisor / e2e can format the primary Azure bring-up
+    /// stderr so the supervisor / e2e can format the primary Azure evidence
     /// diagnostic. Distinct from [`Self::ReportFetchIoctl`] (the
     /// `/dev/sev-guest` errno path used by the GCP/bare-metal report source).
     #[error("report-fetch shell-out '{program}' failed: {stderr}")]
@@ -563,7 +563,7 @@ pub fn verify(ev: &Evidence, params: &VerifyParams<'_>) -> VerifyOutcome {
                 return VerifyOutcome::Failed(FailReason::ProviderProofMismatch);
             }
             // Anchor agreement: only a SevSnp anchor is valid for a SevSnp
-            // proof. Task 5 binds the remaining policy fields (MEAS / min_tcb /
+            // proof. The policy also binds the remaining fields (MEAS / min_tcb /
             // guest_policy) so the reference-value pins below can enforce them.
             let TrustAnchor::SevSnp {
                 amd_product_root,
@@ -587,11 +587,11 @@ pub fn verify(ev: &Evidence, params: &VerifyParams<'_>) -> VerifyOutcome {
             if digest != fields.report_data {
                 return VerifyOutcome::Failed(FailReason::ReportDataMismatch);
             }
-            // Firmware chain + signature (pure, offline) — Task 3. The pins run
+            // Firmware chain + signature (pure, offline). The pins run
             // AFTER chain-success and BEFORE the `Verified` return, so a
             // cryptographically valid report can still be refused on policy.
             // The chain-error mapping (BadSignature→BadSignature, other
-            // VcekError→BadCertChain) is preserved verbatim from Task 4.
+            // VcekError→BadCertChain) is preserved verbatim.
             match vcek::verify_report(report, vcek_cert_chain, amd_product_root) {
                 Ok(()) => {
                     // Reference-value pin: reported TCB must meet the floor.
@@ -731,7 +731,7 @@ const TPM_ALG_RSA: u16 = 0x0001;
 /// `TPM2B_PUBLIC_KEY_RSA` modulus. Returns `None` if the blob is too short,
 /// not an RSA key, or the modulus length is implausible (fail-closed). Pure.
 ///
-/// Grounded in the on-box `tpm2_readpublic -f tss` capture (research note §5):
+/// Grounded in an on-box `tpm2_readpublic -f tss` capture:
 /// modulus `bac197b4…` at TPM2B offset 24 for the default Azure AK.
 fn rsa_modulus_from_tpm2b_public(ak_pub_tpm2b: &[u8]) -> Option<Vec<u8>> {
     // TPM2B_PUBLIC: u16 size prefix (BE) + TPMT_PUBLIC body.
@@ -767,7 +767,7 @@ fn rsa_modulus_from_tpm2b_public(ak_pub_tpm2b: &[u8]) -> Option<Vec<u8>> {
     // keyBits: TPMI_RSA_KEY_BITS (u16 BE) — e.g. 2048. Skip.
     o += 2;
     // exponent: TPMI_RSA_EXONENT is a u32 (BE); 0 means the default 65537.
-    // (NOT a TPM2B — this is the field the on-box walk pinned; research note §5.)
+    // (NOT a TPM2B — this is the field identified by the on-box walk.)
     o += 4;
     // modulus: TPM2B_PUBLIC_KEY_RSA = u16 BE len + bytes.
     let mod_len = u16::from_be_bytes([body[o], body[o + 1]]) as usize;
@@ -792,7 +792,7 @@ fn verify_ak_rsassa_sha256(modulus_be: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     use rsa::pkcs1v15::{Signature, VerifyingKey};
     use rsa::signature::Verifier;
     // TPM RSA keys use the default public exponent 65537 unless set otherwise
-    // (the Azure AK's exponent field is empty → 65537; research note §5).
+    // (the Azure AK's exponent field is empty → 65537).
     let n = rsa::BigUint::from_bytes_be(modulus_be);
     // Build the RSA public key directly from modulus + exponent. `new` checks
     // the modulus is a valid RSA modulus (rejects obviously-forged keys).
@@ -802,7 +802,7 @@ fn verify_ak_rsassa_sha256(modulus_be: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     let vk = VerifyingKey::<sha2::Sha256>::new(pubkey);
     // `tpm2_quote -s` writes a TPMT_SIGNATURE: [scheme alg(u16), hashAlg(u16),
     // sigLen(u16), <sig bytes>]. Strip the 6-byte header to get the raw RSA
-    // signature (256 bytes for RSA-2048). Research note §6 confirmed this layout.
+    // signature (256 bytes for RSA-2048). The on-box capture confirms this layout.
     let raw_sig = strip_tpmt_signature_header(sig);
     let Ok(signature) = Signature::try_from(raw_sig) else {
         return false;
@@ -1138,7 +1138,7 @@ mod tests {
         assert!(software_provider_allowed(false, true));
     }
 
-    // ---- SEV-SNP verify arm (Task 4) --------------------------------------
+    // ---- SEV-SNP verify arm -----------------------------------------------
 
     use crate::vcek::test_support::{self, SyntheticChain};
 
@@ -1268,7 +1268,7 @@ mod tests {
         assert_eq!(verify(&ev, &p), VerifyOutcome::Verified);
     }
 
-    // ---- SEV-SNP reference-value policy pins (Task 5) ---------------------
+    // ---- SEV-SNP reference-value policy pins ------------------------------
 
     /// Builds SEV-SNP evidence that passes every check up to AND INCLUDING the
     /// VCEK chain+signature, with all policy-relevant report fields at their

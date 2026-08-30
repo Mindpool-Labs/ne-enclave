@@ -5,7 +5,7 @@
 //! Request dispatcher.
 //!
 //! Maps a typed [`SupervisorRequest`] to a typed [`SupervisorResponse`].
-//! Per ARCH §4.2 this is the only path from public API to privileged
+//! This is the only path from public API to privileged
 //! operation; no free-form strings reach the supervisor through here.
 
 use std::sync::Arc;

@@ -5,7 +5,7 @@
 //! Per-workspace DNS forwarder that filters queries against a
 //! hostname allowlist.
 //!
-//! Phase 1 P0 first cut. The supervisor (E4.b) spawns one of these
+//! The current implementation. The supervisor spawns one of these
 //! per workspace inside the workspace netns, listening on the host
 //! veth IP. Queries for names matching the allowlist (suffix match,
 //! e.g. `openai.com` matches `api.openai.com`) get forwarded to the
@@ -37,7 +37,7 @@ use tracing::{debug, info, warn};
 
 /// Maximum size of a single DNS-over-UDP datagram we'll accept.
 ///
-/// EDNS0 negotiates larger payloads; for the P0 first cut we cap at
+/// EDNS0 negotiates larger payloads; the current implementation caps at
 /// the legacy 512-byte default plus enough headroom for typical EDNS
 /// responses. Queries larger than this are dropped with a logged
 /// warning (callers retry over TCP per RFC 7766 — TCP support is

@@ -14,9 +14,18 @@ env:
   BUILDROOT_VERSION: "2025.05"
 
 jobs:
+  public-boundary:
+    name: public information boundary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check public information boundary
+        run: sh scripts/check-public-boundary.sh
+
   release-contract:
     name: release component contract
     runs-on: ubuntu-24.04
+    needs: [public-boundary]
     steps:
       - uses: actions/checkout@v6
       - name: release component contract
@@ -25,6 +34,7 @@ jobs:
   license-check:
     name: license check (cargo-deny)
     runs-on: ubuntu-24.04
+    needs: [public-boundary]
     steps:
       - uses: actions/checkout@v6
       - name: Run cargo-deny
@@ -40,6 +50,7 @@ jobs:
   lint:
     name: fmt + clippy
     runs-on: ubuntu-24.04
+    needs: [public-boundary]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -55,6 +66,7 @@ jobs:
   test:
     name: cargo test --workspace
     runs-on: ubuntu-24.04
+    needs: [public-boundary]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -76,6 +88,7 @@ jobs:
   ts-sdk:
     name: TypeScript SDK
     runs-on: ubuntu-24.04
+    needs: [public-boundary]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -110,7 +123,7 @@ jobs:
     # main pushes + manual dispatch, never on dev pushes or PRs (quota).
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
-    needs: [lint, test, release-contract]
+    needs: [public-boundary, lint, test, release-contract]
     steps:
       - uses: actions/checkout@v6
       - name: Verify KVM availability
@@ -162,10 +175,10 @@ jobs:
             https://gitlab.com/buildroot.org/buildroot.git "${HOME}/buildroot"
           mkdir -p "${HOME}/buildroot-dl" "${HOME}/.buildroot-ccache"
           export BR2_DL_DIR="${HOME}/buildroot-dl"
-          cargo run -p ne-image -- build --template phase0-spike --buildroot "${HOME}/buildroot"
+          cargo run -p ne-image -- build --template standard --buildroot "${HOME}/buildroot"
           sudo mkdir -p /var/lib/ne-enclave
-          sudo cp target/images/phase0-spike/images/vmlinux     /var/lib/ne-enclave/vmlinux
-          sudo cp target/images/phase0-spike/images/rootfs.ext4 /var/lib/ne-enclave/rootfs.img
+          sudo cp target/images/standard/images/vmlinux     /var/lib/ne-enclave/vmlinux
+          sudo cp target/images/standard/images/rootfs.ext4 /var/lib/ne-enclave/rootfs.img
           ls -l /var/lib/ne-enclave/
       - name: cargo test -p ne-e2e (root — jailer needs CAP_CHOWN)
         env:
@@ -210,7 +223,7 @@ jobs:
     # main-branch validation build. Skip on dev/PRs to save quota.
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
-    needs: [lint, test, release-contract]
+    needs: [public-boundary, lint, test, release-contract]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -257,7 +270,7 @@ jobs:
     # systemd unit render + verify — main pushes + manual dispatch only.
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
-    needs: [test]
+    needs: [public-boundary, test]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

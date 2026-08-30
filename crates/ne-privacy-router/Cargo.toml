@@ -9,7 +9,7 @@
 # (`ne_privacy_router`) — which downstream wedges depend on, so the
 # `openshell-pii` SHA pin stays a single-file change here — and a
 # binary (`ne-privacy-router`) that the supervisor will spawn per
-# workspace in Wedge 5.3.
+# workspace in the supervisor integration.
 
 [package]
 name = "ne-privacy-router"

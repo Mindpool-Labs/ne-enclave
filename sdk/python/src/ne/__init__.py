@@ -1,6 +1,6 @@
 """NeuronEdge Enclave Python SDK.
 
-Thin client wrapper over the NeuronEdge Enclave Runtime API (gRPC). Phase 1 P0
+Thin client wrapper over the NeuronEdge Enclave Runtime API (gRPC). The current
 surface: Ping, CreateWorkspace, ExecuteCommand, DestroyWorkspace.
 """
 

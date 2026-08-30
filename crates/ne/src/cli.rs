@@ -181,7 +181,7 @@ pub struct ServeSupervisorArgs {
     pub state_dir: PathBuf,
 
     /// Max concurrent workspaces (0 = derive from host RAM). Soft ceiling —
-    /// an exhaustion backstop, not a hard quota (audit O3).
+    /// an exhaustion backstop, not a hard quota.
     #[arg(long, env = "NE_MAX_WORKSPACES", default_value_t = 0)]
     pub max_workspaces: usize,
 

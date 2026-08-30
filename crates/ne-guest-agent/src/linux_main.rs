@@ -118,7 +118,7 @@ async fn handle_connection(stream: VsockStream, started_at: Instant) -> std::io:
         line.clear();
         // Cap each incoming request frame at MAX_GUEST_FRAME_BYTES so a
         // runaway host (or a misbehaving sender) cannot grow this buffer
-        // without bound (audit S3-F3). Mirrors read_capped_line in
+        // without bound. Mirrors read_capped_line in
         // crates/ne-supervisor/src/ipc.rs — kept local; the guest-agent
         // is a separate cfg(linux) crate with no shared dep on supervisor.
         let n = {
@@ -161,7 +161,7 @@ async fn dispatch(req: GuestRequest, started_at: Instant) -> GuestResponse {
         GuestRequest::WriteFile(req) => write_file(req).await,
         GuestRequest::ReadFile(req) => read_file(req).await,
         GuestRequest::ResetIdentity(req) => crate::identity::reset_identity(&req),
-        // Future variants land via RFC per ARCH §17.6.
+        // Future variants require an RFC.
         _ => GuestResponse::Error {
             kind: GuestErrorKind::Internal,
             message: "operation not implemented in this guest-agent build".to_string(),
@@ -174,7 +174,7 @@ async fn run_command(req: RunCommandRequest) -> GuestResponse {
     let _wallclock = SystemTime::now(); // reserved for future audit-event timestamping
 
     // Spawn with piped stdout/stderr so we can cap each stream independently
-    // (audit S3-F2). kill_on_drop(true) ensures the child is reaped when the
+    // kill_on_drop(true) ensures the child is reaped when the
     // capture future is dropped on timeout.
     let mut cmd = Command::new(&req.command);
     cmd.args(&req.args)
@@ -195,7 +195,7 @@ async fn run_command(req: RunCommandRequest) -> GuestResponse {
 
     // Take the piped handles before the capture future is constructed. They are
     // `Some` because stdout/stderr were just set to `piped()`; handle `None`
-    // gracefully rather than panic (STANDARDS §2.1: no unwrap/expect in prod).
+    // gracefully rather than panic (no unwrap/expect in production).
     let (Some(mut stdout_pipe), Some(mut stderr_pipe)) = (child.stdout.take(), child.stderr.take())
     else {
         return GuestResponse::Error {
@@ -271,8 +271,8 @@ async fn write_file_with_timeout(req: WriteFileRequest, op_timeout: Duration) ->
     let jail = std::path::Path::new(JAIL_ROOT).to_path_buf();
     // NOTE: create_dir_all runs on the async thread BEFORE spawn_blocking,
     // so a wedged filesystem could hang here outside the FILE_OP_TIMEOUT
-    // budget. Acceptable for Phase 1 — /workspace is tmpfs in the guest
-    // image — but tighten in a future wedge if a real filesystem replaces
+    // budget. Acceptable for the current guest image — /workspace is tmpfs in the guest
+    // image — but tighten in a future release if a real filesystem replaces
     // tmpfs.
     let _ = std::fs::create_dir_all(&jail);
     let bytes_written = req.content.len() as u64;
@@ -492,7 +492,7 @@ mod tests {
         // progress. This exercises the Timeout match arm deterministically
         // but does not test real blocking-thread interruption. Genuine
         // wedged-disk behaviour is exercised by the Firecracker e2e test
-        // landed in Task 4.
+        // covered by the Firecracker end-to-end test.
         let resp = write_file_with_timeout(
             WriteFileRequest {
                 path: "timeout-probe.txt".into(),
@@ -553,7 +553,7 @@ mod tests {
         // progress. This exercises the Timeout match arm deterministically
         // but does not test real blocking-thread interruption. Genuine
         // wedged-disk behaviour is exercised by the Firecracker e2e test
-        // landed in Task 4.
+        // covered by the Firecracker end-to-end test.
         let resp = read_file_with_timeout(
             ReadFileRequest {
                 path: "timeout-probe.txt".into(),
@@ -578,7 +578,7 @@ mod tests {
 
     /// Verify that `run_command` caps stdout at `MAX_CMD_OUTPUT_BYTES` and sets
     /// `truncated = true` when a child produces more output than the cap
-    /// (audit S3-F2). `head -c <2×cap> /dev/zero` emits 2 MiB of NUL bytes to
+    /// `head -c <2×cap> /dev/zero` emits 2 MiB of NUL bytes to
     /// stdout; the guest rootfs ships coreutils at `/usr/bin/head`.
     #[cfg(target_os = "linux")]
     #[tokio::test]

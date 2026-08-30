@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// NeuronEdge Enclave public benchmark harness (ARCH §15).
+/// NeuronEdge Enclave public benchmark harness.
 #[derive(Debug, Parser)]
 #[command(
     name = "ne-bench",

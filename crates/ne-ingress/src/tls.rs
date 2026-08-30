@@ -7,7 +7,7 @@
 //! Exposes [`load_server_config`] to build a rustls [`ServerConfig`] from
 //! operator-supplied PEM files, and [`plaintext_listener_allowed`] to enforce
 //! the loopback-only plaintext guard (mirrors the ne-api TLS guard from
-//! wedge 6.7).
+//! TLS integration).
 //!
 //! Uses the **ring** crypto provider (the workspace pins ring; aws-lc-rs is
 //! musl-hostile and the release build targets musl).

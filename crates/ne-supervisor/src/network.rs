@@ -4,7 +4,7 @@
 
 //! Per-workspace network plumbing — Linux-only.
 //!
-//! Phase 1 P0 first cut scope (this iteration):
+//! Current scope:
 //!   - per-workspace network namespace (`ip netns add ne-<id>`)
 //!   - host-side veth (`vh-<id>`) ↔ guest-side veth (`vg-<id>`)
 //!     pair, with `vg-` moved into the netns
@@ -19,9 +19,9 @@
 //!   - DNS mediation
 //!   - L7 inspection / privacy-router integration
 //!   - audit event emission for network decisions (`network.allowed`,
-//!     `network.denied`, `network.dns_resolved` per FR-6.7)
+//!     `network.denied`, `network.dns_resolved`)
 //!   - wiring into `WorkspaceManager::{create,terminate}` so each
-//!     workspace gets a network automatically — Phase 0 tests keep
+//!     workspace gets a network automatically — existing tests keep
 //!     passing because this module is currently invoked only by its
 //!     own integration test.
 //!
@@ -29,7 +29,7 @@
 //! `iptables` rather than going through netlink directly. The
 //! shell-out path matches what most Firecracker-using projects do
 //! today and is well-understood operationally; a netlink rewrite is
-//! a Phase 1 P1 follow-up once the shell-out semantics are pinned.
+//! a later follow-up once the shell-out semantics are pinned.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -517,7 +517,7 @@ impl NetworkController {
         self.install_forward_chain(slot, &forward_chain, policy)
             .await?;
 
-        // Anti-spoof (audit S2-F5): bind this veth's traffic to the slot's own
+        // Anti-spoof: bind this veth's traffic to the slot's own
         // /30 at the top of FORWARD so a root guest cannot craft a source
         // outside its subnet, bypass the netns SNAT, and have egress evaluated
         // against another slot's chain.
@@ -631,7 +631,7 @@ impl NetworkController {
         {
             warn!(error = %e, chain = %slot.forward_chain, "FORWARD chain delete failed");
         }
-        // Remove the anti-spoof rule (audit S2-F5); it references `-i <veth>`,
+        // Remove the anti-spoof rule; it references `-i <veth>`,
         // which outlives the netns, so iptables keeps a stale rule otherwise.
         if let Err(e) = self
             .uninstall_antispoof_rule(&slot.veth_host, slot.slot)
@@ -1483,7 +1483,7 @@ mod tests {
     #[test]
     fn antispoof_rule_binds_veth_to_slot_subnet() {
         // Insert at FORWARD position 1, dropping any source outside the slot's
-        // own /30 arriving on the workspace veth (audit S2-F5).
+        // own /30 arriving on the workspace veth.
         let insert = antispoof_forward_argv(AntiSpoofOp::Insert, "vh-abcd1234", 7);
         assert_eq!(
             insert,

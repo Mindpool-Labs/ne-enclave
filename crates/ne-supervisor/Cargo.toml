@@ -19,14 +19,14 @@ path = "src/lib.rs"
 # (Firecracker) build is byte-identical. When enabled on Linux, pulls in
 # `russh` for SSH control of spawned OpenShell sandboxes. OpenShell itself
 # is NOT a Cargo dependency — the supervisor spawns the `openshell-sandbox`
-# binary as a subprocess (see `src/openshell.rs`, R1 spec §3.2).
+# binary as a subprocess (see `src/openshell.rs`).
 [features]
 default = []
 confidential-cvm = ["dep:russh", "dep:russh-sftp", "dep:async-trait", "dep:pkcs8"]
 # Exposes a thin `pub` test-hook around `firecracker::api_put` (otherwise
 # private) so integration tests under `tests/` — which link the crate as an
 # external dependency and can't see `pub(crate)`/`#[cfg(test)]` items — can
-# drive its timeout directly (audit O2). No production impact: mirrors
+# drive its timeout directly. No production impact: mirrors
 # `ne-attestation`'s `test-support` feature (see its Cargo.toml). Off by
 # default.
 test-support = []

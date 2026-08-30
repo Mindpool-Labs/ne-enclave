@@ -62,7 +62,7 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-# Keep the Phase 1 P0 lint floor pragmatic — match the project's
+# Keep the current lint floor pragmatic — match the project's
 # overall "zero warnings" discipline but don't fight the generated
 # protobuf code (which lives outside ruff's scope via per-file
 # ignores in tool.ruff.lint.per-file-ignores below).

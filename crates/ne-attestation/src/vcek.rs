@@ -21,8 +21,8 @@
 //! REAL AMD RSA signatures (ARK self-sig; ASK-under-ARK) — verification-only,
 //! genuine signatures on genuine public certs. The synthetic P-384 chain tests
 //! cover the ECDSA chain-walk logic. Nothing here claims a hardware-rooted
-//! attestation *report* validates — that is proven on silicon in Task 6 (PRD
-//! §50 claim discipline).
+//! attestation *report* validates — that is proven on silicon by the hardware
+//! integration test.
 //!
 //! References: AMD "SEV Secure Nested Paging Firmware ABI Specification"
 //! (VCEK certificate format; report signature algorithm ECDSA P-384 over
@@ -61,7 +61,7 @@ pub const AMD_MILAN_ARK_DER: &[u8] = include_bytes!("../certs/amd-milan-ark.der"
 /// The genuine Milan ASK DER (RSA-4096, signed by the ARK).
 ///
 /// Public AMD KDS trust material, baked for test-reference; the supervisor
-/// fetches the ASK at runtime (Task 3) to embed alongside the VCEK in
+/// fetches the ASK at runtime to embed alongside the VCEK in
 /// `Proof::SevSnp`.
 pub const AMD_MILAN_ASK_DER: &[u8] = include_bytes!("../certs/amd-milan-ask.der");
 
@@ -100,7 +100,7 @@ pub enum PubKey {
 ///
 /// The crate ships the genuine Milan ARK as a known-good default via
 /// [`Self::milan_default`]; callers may supply their own ARK DER via
-/// `SealingPolicy.trust_anchor.amd_product_root_der` (Task 4), which the gate
+/// `SealingPolicy.trust_anchor.amd_product_root_der`, which the gate
 /// re-parses through [`Self::from_der`].
 #[derive(Debug, Clone)]
 pub struct AmdRootCert {
@@ -563,7 +563,7 @@ impl VcekFetcher for KdsVcekFetcher {
         // `verify_report`'s walk validates VCEK -> ASK -> ARK(root). The ARK
         // root is NOT embedded (it is the gate's anchor, AmdRootCert::milan_default).
         // AMD KDS serves only the VCEK leaf; the ASK + ARK are the genuine baked
-        // product certs (spec §3.2 refinement — see `AMD_MILAN_ASK_DER`).
+        // product certs (see `AMD_MILAN_ASK_DER`).
         Ok([vcek.as_slice(), AMD_MILAN_ASK_DER].concat())
     }
 }
@@ -580,7 +580,7 @@ impl VcekFetcher for KdsVcekFetcher {
 pub mod test_support {
     //! Shared synthetic P-384 cert material + report-signing helpers.
     //!
-    //! Reused by Task 4's `SevSnp` verify tests. All material here is synthetic:
+    //! Reused by `SevSnp` verify tests. All material here is synthetic:
     //! rcgen-minted P-384 ARK/ASK/VCEK + reports signed by the synthetic VCEK.
     //! Nothing is a real AMD-signed artifact.
 
@@ -756,7 +756,7 @@ pub mod test_support {
         report[sig_start..sig_start + 512].copy_from_slice(&field);
     }
 
-    /// Parse a DER cert to confirm it is well-formed (used by Task 4 helpers).
+    /// Parse a DER cert to confirm it is well-formed (used by test helpers).
     #[allow(dead_code)]
     pub fn _assert_parses(cert_der: &[u8]) -> bool {
         x509_cert::Certificate::from_der(cert_der).is_ok()
@@ -845,7 +845,7 @@ mod tests {
     // These exercise the REAL RSA-4096 RSASSA-PSS-SHA384 path. The ARK + ASK are
     // public certs fetched from AMD KDS; verifying their signatures is
     // verification-only (no private key). Nothing here claims a hardware-rooted
-    // report validates — that is proven on silicon in Task 6.
+    // report validates — that is proven on silicon by the hardware integration test.
 
     #[test]
     fn milan_default_ark_parses_and_matches_pinned_hash() {

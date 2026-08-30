@@ -1,6 +1,6 @@
 [package]
 name = "ne-enclave-wasm"
-description = "WASM seam over ne-seal verify + kek for the control-plane Worker (Apache-2.0)."
+description = "WASM seam over ne-seal verification and KEK handling for external evaluation tooling."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

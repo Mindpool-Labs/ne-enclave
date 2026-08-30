@@ -39,6 +39,9 @@ tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
 # Enable `ne-attestation`'s synthetic-material module (`vcek::test_support`) so
 # the orchestration tests can exercise the SevSnp gate against a synthetic
 # AMD-rooted chain. Feature is off for non-test builds — no prod impact.

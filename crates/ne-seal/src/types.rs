@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sealed-snapshot data model (ARCH §952, design §4).
+//! Sealed-snapshot data model.
 
 use ne_attestation::{Measurement, ProviderType};
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ pub const SEAL_VERSION: u32 = 1;
 /// Domain-separation tag embedded in every seal signature.
 pub const SEAL_DOMAIN_TAG: &str = "ne-enclave-seal-v1";
 /// Domain-separation tag for the (unsigned, hashed) policy canonical form used
-/// as DEK-wrap GCM associated data (R2 — stable + versioned).
+/// as stable, versioned DEK-wrap GCM associated data.
 pub const POLICY_DOMAIN_TAG: &str = "ne-enclave-sealing-policy-v1";
 
 /// The attestation policy a sealed snapshot demands at restore time. Embedded

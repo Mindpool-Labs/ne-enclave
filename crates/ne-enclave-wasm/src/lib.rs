@@ -2,17 +2,16 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! WASM seam over `ne-seal` for the control-plane Worker (Apache-2.0).
+//! WASM seam over `ne-seal` for external evaluation tooling.
 //!
-//! Exposes three JSON-in/JSON-out functions (spec §5.3): the authoritative
-//! server-side attestation gate + the DEK wrap/unwrap. Pure: `verify` needs no
-//! RNG; `wrap_dek` takes a HOST-SUPPLIED nonce (spec §5.4) because wasm32 has no
-//! host RNG by default. The wasm32 build is consumed by the BSL `ne-control-plane`
-//! repo as `wasm/ne_enclave_wasm.wasm`.
+//! Exposes three JSON-in/JSON-out functions: attestation-policy evaluation and
+//! DEK wrap/unwrap. Pure: `verify` needs no
+//! RNG; `wrap_dek` takes a HOST-SUPPLIED nonce because wasm32 has no host RNG by
+//! default. This module does not select or make a production external
+//! key-release backend ready.
 //!
-//! HONEST (PRD §50): the `SevSnp` arm is synthetic-evidence-tested only
-//! (`Wedge-1` ceiling); the wasm build reuses the exact audited Rust — no
-//! crypto reimpl.
+//! The `SevSnp` arm is synthetic-evidence-tested only. The WASM build reuses
+//! the exact audited Rust; it does not reimplement cryptography.
 
 #![cfg_attr(not(test), allow(clippy::expect_used))]
 
@@ -43,7 +42,7 @@ pub mod native {
         }
     }
 
-    /// Wrap a DEK under a KEK with a host-supplied nonce (spec §5.4).
+    /// Wrap a DEK under a KEK with a host-supplied nonce.
     ///
     /// Returns `{"wrapped_dek_b64":".."}` on success or
     /// `{"ok":false,"error":".."}` on bad input.
@@ -74,8 +73,8 @@ pub mod native {
 
     /// Unwrap a DEK under a KEK.
     ///
-    /// The GCM nonce is host-supplied (spec §5.4): in the real CP path it
-    /// travels inside the seal's `DekEnvelope` and the Worker forwards it here.
+    /// The GCM nonce is host-supplied: in the real CP path it
+    /// travels inside the seal's `DekEnvelope` and external tooling forwards it here.
     /// Returns `{"dek_b64":".."}` on success or `{"ok":false,"error":".."}` on
     /// failure.
     pub fn unwrap_dek_json(
@@ -196,7 +195,7 @@ fn parse_wrap_inputs(
 // ---- wasm32 RNG shim --------------------------------------------------------
 // Under `wasm32-unknown-unknown` getrandom has no host RNG. The seam is
 // constructed to need NONE of it (`verify_against_policy` is pure; `wrap_dek`
-// takes a HOST-SUPPLIED nonce per spec §5.4). We register a custom getrandom
+// takes a HOST-SUPPLIED nonce). We register a custom getrandom
 // backend that loudly panics so any future code path that reaches RNG fails
 // immediately rather than silently producing broken key material.
 #[cfg(target_arch = "wasm32")]
@@ -205,13 +204,13 @@ mod getrandom_shim {
     fn always_fail(_buf: &mut [u8]) -> Result<(), getrandom::Error> {
         panic!(
             "getrandom reached in ne-enclave-wasm: no RNG on wasm32; verify is pure and the \
-             wrap nonce is host-supplied (spec §5.4)"
+             wrap nonce is host-supplied"
         );
     }
     getrandom::register_custom_getrandom!(always_fail);
 }
 
-// ---- wasm32 wrappers (consumed by the CP Worker) ----------------------------
+// ---- wasm32 wrappers (consumed by external evaluation tooling) --------------
 // These are consumed via `#[wasm_bindgen]` JS export, which Rust's
 // reachability analysis can't see, hence the dead-code allow.
 #[cfg(target_arch = "wasm32")]

@@ -2,16 +2,17 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! e2e: SEV-SNP hardware-rooted key release on Azure DCasv5 (OpenHCL vTPM + TPM Quote).
+//! e2e: Azure SEV-SNP real-silicon evidence validation against an external
+//! non-production test endpoint (OpenHCL vTPM + TPM Quote).
 //!
 //! HOST-GATED: requires an Azure DCasv5/ECasv5 SEV-SNP CVM with `tpm2-tools` ≥ 5.2
 //! installed (`sudo tpm2_nvread -C o 0x01400001` succeeds — NOT `/dev/sev-guest`,
-//! which Azure does not expose) AND a live control-plane Worker reachable from
-//! the CVM (`NE_CP_KEY_RELEASE_ENDPOINT` + `NE_CP_API_KEY`). NOT claimed to pass
+//! which Azure does not expose) AND an external non-production test endpoint reachable from
+//! the CVM with configured TLS files. NOT claimed to pass
 //! until exercised on provisioned hardware — `#[ignore]` everywhere without a CVM.
 //!
-//! This is the Azure real-silicon round-trip for the hardware-rooted key-release
-//! claim (PRD §50 / ARCH §6.4), using the v2 **TPM-Quote 2-layer binding**:
+//! This validates Azure real-silicon evidence against a non-production test
+//! endpoint, using the **TPM-Quote 2-layer binding**:
 //! - Layer 1: the boot-fixed AMD SNP report (read via `tpm2_nvread`) validated to
 //!   the baked Milan ARK, with `SHA256(var_data) == report.REPORT_DATA[..32]`
 //!   anchoring the vTPM Attestation Key (AK) into the hardware-signed report.
@@ -19,19 +20,20 @@
 //!   whose signature covers a `TPM2B_ATTEST` embedding our per-workspace nonce.
 //!
 //! TCB = the OpenHCL paravisor + UEFI launch digest (the report's `MEAS`), NOT
-//! guest-code measurement — see THREAT-MODEL §4 + spec v2 §2. No nested
-//! Firecracker microVM is booted (Model-A nested bring-up is a separate wedge).
+//! guest-code measurement. No nested Firecracker microVM is booted.
 //!
-//! Run manually on a provisioned Azure CVM (Worker already deployed live):
+//! Run manually on a provisioned Azure CVM with a configured test endpoint:
 //! ```sh
-//! NE_CP_KEY_RELEASE_ENDPOINT=https://<worker>/v1 \
-//! NE_CP_API_KEY=<key> \
+//! NE_CP_KEY_RELEASE_ENDPOINT=https://<endpoint>/v1 \
+//! NE_CP_TLS_CA_CERT=<ca-pem-path> \
+//! NE_CP_TLS_CLIENT_CERT=<client-cert-pem-path> \
+//! NE_CP_TLS_CLIENT_KEY=<client-key-pem-path> \
 //! cargo test -p ne-e2e --test sev_snp_azure -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! **Claim discipline:** until this passes on a named DCasv5 pinned to the real
-//! Milan ARK, the Azure hardware-rooted key-release claim stays UNCLAIMED. The
-//! Task 6 bring-up report records the genuine fingerprints + the pass.
+//! A pass on a named DCasv5 pinned to the real Milan ARK validates the evidence
+//! path and emits genuine fingerprints. It does not select or make a production
+//! key-release backend ready.
 
 #![cfg(target_os = "linux")]
 
@@ -48,7 +50,7 @@ use ne_attestation::{
     vcek::{AMD_MILAN_ARK_DER, AmdRootCert, KdsVcekFetcher, VcekCache, VcekFetcher},
 };
 use ne_protocol::snapshot::{GuestIdentity, MANIFEST_VERSION, SnapshotManifest};
-use ne_seal::key_release_cp::ControlPlaneKeyReleaseClient;
+use ne_seal::key_release_cp::{ControlPlaneKeyReleaseClient, ControlPlaneTlsFiles};
 use ne_seal::orchestration::{seal_artifacts, unseal_artifacts};
 use ne_seal::types::{KekProvider, SealingPolicy, SealingTrustAnchor};
 use sha2::Digest;
@@ -59,9 +61,9 @@ fn wall_now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// `#[ignore]` real-silicon e2e: the Azure TPM-Quote 2-layer hardware-rooted key-release round-trip.
+/// `#[ignore]` Azure real-silicon evidence validation against a test endpoint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires an Azure DCasv5 CVM + tpm2-tools + a live CP Worker"]
+#[ignore = "requires an Azure DCasv5 CVM + tpm2-tools + an external test endpoint"]
 async fn sev_snp_azure_vtpm_key_release_round_trip() {
     // Pre-flight: the Azure path uses the vTPM (NVRAM 0x01400001), NOT
     // /dev/sev-guest. `tpm2_nvread -C o 0x01400001` (POSITIONAL index — tpm2-tools
@@ -79,21 +81,29 @@ async fn sev_snp_azure_vtpm_key_release_round_trip() {
         );
         return;
     }
-    let (endpoint, api_key) = match (
-        std::env::var("NE_CP_KEY_RELEASE_ENDPOINT"),
-        std::env::var("NE_CP_API_KEY"),
-    ) {
-        (Ok(e), Ok(k)) => (e, k),
-        _ => panic!("NE_CP_KEY_RELEASE_ENDPOINT + NE_CP_API_KEY must point at the live Worker"),
+    let endpoint = std::env::var("NE_CP_KEY_RELEASE_ENDPOINT")
+        .expect("NE_CP_KEY_RELEASE_ENDPOINT must point at a test endpoint");
+    let tls = ControlPlaneTlsFiles {
+        ca_cert: std::env::var("NE_CP_TLS_CA_CERT")
+            .expect("NE_CP_TLS_CA_CERT must name a CA PEM file")
+            .into(),
+        client_cert: std::env::var("NE_CP_TLS_CLIENT_CERT")
+            .expect("NE_CP_TLS_CLIENT_CERT must name a client certificate PEM file")
+            .into(),
+        client_key: std::env::var("NE_CP_TLS_CLIENT_KEY")
+            .expect("NE_CP_TLS_CLIENT_KEY must name a client key PEM file")
+            .into(),
     };
+    let api_key = std::env::var("NE_CP_API_KEY").ok();
 
     // --- SEV-SNP provider + the Azure vTPM source (generate() dispatches to SevSnpAzure) ---
     let azure_source = AzureVtpmReportSource::open().expect("open Azure vTPM source");
     let vcek: Arc<dyn VcekFetcher> = Arc::new(VcekCache::new(KdsVcekFetcher::new()));
     let provider = SevSnpProvider::new_azure(azure_source, vcek);
 
-    // --- CP client (live Worker, SoftwareKms backend) ---
-    let cp = ControlPlaneKeyReleaseClient::new(endpoint, api_key, Arc::new(wall_now));
+    // --- External test client ---
+    let cp = ControlPlaneKeyReleaseClient::new_mtls(endpoint, api_key, tls, Arc::new(wall_now))
+        .expect("mTLS client configuration");
     let cp_wrap: Option<&dyn ne_seal::key_release_cp::CpWrapClient> = Some(&cp);
 
     // --- Ed25519 host key for seal.json + manifest.json signing ---
@@ -162,7 +172,7 @@ async fn sev_snp_azure_vtpm_key_release_round_trip() {
         expected_measurement: None,
     };
 
-    // --- Seal (CP wrap-dek, SoftwareKms) ---
+    // --- Seal via the external test client ---
     let envelope = seal_artifacts(
         &snap,
         &manifest,
@@ -192,7 +202,7 @@ async fn sev_snp_azure_vtpm_key_release_round_trip() {
         .expect("generate Azure evidence");
     assert_eq!(evidence.provider_type, ProviderType::SevSnp);
 
-    // --- Emit the genuine fingerprints for the bring-up report ---
+    // --- Emit genuine evidence fingerprints ---
     print_fingerprints(&evidence, &envelope);
 
     // --- Unseal (the restore trust path): fail-fast local gate -> authoritative
@@ -230,7 +240,8 @@ async fn sev_snp_azure_vtpm_key_release_round_trip() {
 
     eprintln!(
         "sev_snp_azure_vtpm_key_release_round_trip: PASSED \
-         (hardware-rooted key release verified on Azure DCasv5 — TPM-Quote 2-layer binding)"
+         (Azure real-silicon evidence validated through an \
+          external non-production test endpoint)"
     );
 }
 
@@ -244,7 +255,7 @@ fn hex_sha256(b: &[u8]) -> String {
 
 /// Print the genuine chip_id, REPORTED_TCB, MEASUREMENT, the AK modulus, the
 /// Layer-1 var_data→REPORT_DATA match, the VCEK+ASK chain + ARK SHA-256 — captured
-/// into the Task 6 bring-up report. Public, non-secret values.
+/// by this test. Public, non-secret values.
 fn print_fingerprints(
     evidence: &ne_attestation::Evidence,
     envelope: &ne_seal::types::SealEnvelope,
@@ -268,7 +279,7 @@ fn print_fingerprints(
     });
     let report_data = report.get(0x50..0x90).unwrap_or(&[]);
     let layer1_ok = ne_attestation::sha256_matches_report_data(var_data, report_data);
-    eprintln!("=== Azure DCasv5 SEV-SNP (vTPM + TPM Quote) bring-up fingerprints ===");
+    eprintln!("=== Azure DCasv5 SEV-SNP (vTPM + TPM Quote) validation fingerprints ===");
     eprintln!("report source: vTPM NVRAM 0x01400001 (OpenHCL paravisor-relayed, boot-fixed)");
     eprintln!("binding: TPM-Quote 2-layer (L1: var_data→REPORT_DATA; L2: AK-signed nonce)");
     eprintln!("chip_id (hex, 64B): {}", hex::encode(chip_id));

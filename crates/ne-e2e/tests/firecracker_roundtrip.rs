@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge 5.5: real Firecracker round-trip. Boots a microVM via
+//! Real Firecracker round-trip. Boots a microVM via
 //! [`ne_supervisor::firecracker::launch`], hits Ping, RunCommand,
 //! WriteFile, ReadFile across the vsock, then terminates and asserts
 //! chroot cleanup.

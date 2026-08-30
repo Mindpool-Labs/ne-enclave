@@ -1,7 +1,7 @@
 """gRPC client wrapper for the NeuronEdge Enclave Runtime API.
 
-Phase 1 P0 first cut: insecure channel (dev mode); mTLS / JWT / API
-key arrive in P1 alongside the API daemon's auth surface. All
+Current scope: insecure channel (dev mode); mTLS / JWT / API
+key arrive alongside the API daemon's auth surface. All
 methods are synchronous; an async variant is a separate follow-up.
 """
 
@@ -26,7 +26,7 @@ class Client:
     Each method returns the raw protobuf response message. Callers
     that want native Python types can access fields directly
     (``pong.supervisor_version``) — wrapping into dataclasses is a
-    deliberate non-goal for the Phase 1 P0 first cut.
+    deliberate non-goal for the current implementation.
     """
 
     def __init__(
@@ -140,8 +140,8 @@ class Client:
         ``enable_privacy_router=True`` opts the workspace into the
         host-side HTTP privacy router (PII scanning of TCP/80 egress
         bodies). The PII policy itself is operator-set on the
-        supervisor in Phase 1 P0; per-workspace policy override lands
-        in Phase 2. Requires the supervisor to have been started with
+        supervisor today; a per-workspace policy override can be added
+        in a later compatible extension. Requires the supervisor to have been started with
         ``--privacy-router-binary`` and ``--privacy-router-policy``.
         ``exposed_ports`` declares which guest ports the host-side
         ingress router should proxy inbound traffic to. Each element

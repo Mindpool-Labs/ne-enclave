@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge A (audit C1): two concurrent `CreateWorkspace` with the SAME
+//! Concurrent `CreateWorkspace` calls with the SAME
 //! caller-supplied id must never produce two live workspaces and must never
 //! leak a second chroot/netns for the loser.
 //!

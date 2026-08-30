@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Supervisor-side sealed-snapshot wiring (ARCH §952, design §3).
+//! Supervisor-side sealed-snapshot wiring.
 //!
 //! Holds the host Ed25519 key (via `AuditLog::signing_key`) + the active
 //! attestation provider + the software-fallback key release, and exposes
@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ne_attestation::{AttestationProvider, Measurement};
 use ne_seal::SealError;
 use ne_seal::key_release::{SoftwareFallbackKeyRelease, software_kek_allowed};
-use ne_seal::key_release_cp::ControlPlaneKeyReleaseClient;
+use ne_seal::key_release_cp::{ControlPlaneKeyReleaseClient, ControlPlaneTlsFiles};
 use ne_seal::orchestration::{seal_artifacts, unseal_artifacts};
 use ne_seal::types::SealingPolicy;
 
@@ -48,28 +48,69 @@ impl SupervisorSealer {
     /// the software KEK may be used; `software_kek_allowed(false, _)` => the
     /// unseal path will refuse to build a `SoftwareFallbackKeyRelease`.
     ///
-    /// The CP key-release client is constructed only when BOTH
-    /// `NE_CP_KEY_RELEASE_ENDPOINT` and `NE_CP_API_KEY` are set; otherwise it is
-    /// `None` and the `ControlPlane` KEK path fails closed with `Unconfigured`.
-    #[must_use]
-    pub fn new(audit: AuditLog, provider: Arc<dyn AttestationProvider>, dev_mode: bool) -> Self {
+    /// The key-release transport accepts either a complete mTLS configuration
+    /// or a loopback development endpoint with bearer credentials. Any partial
+    /// configuration is an error.
+    pub fn new(
+        audit: AuditLog,
+        provider: Arc<dyn AttestationProvider>,
+        dev_mode: bool,
+    ) -> Result<Self, SealError> {
         let allow_env = std::env::var("NE_SEAL_ALLOW_SOFTWARE").is_ok();
-        let cp = match (
-            std::env::var("NE_CP_KEY_RELEASE_ENDPOINT"),
-            std::env::var("NE_CP_API_KEY"),
-        ) {
-            (Ok(endpoint), Ok(api_key)) => Some(ControlPlaneKeyReleaseClient::new(
-                endpoint,
-                api_key,
-                Arc::new(wall_clock_now),
-            )),
-            _ => None,
-        };
-        Self {
+        let cp = Self::cp_client_from_values(
+            std::env::var("NE_CP_KEY_RELEASE_ENDPOINT").ok(),
+            std::env::var("NE_CP_TLS_CA_CERT").ok(),
+            std::env::var("NE_CP_TLS_CLIENT_CERT").ok(),
+            std::env::var("NE_CP_TLS_CLIENT_KEY").ok(),
+            std::env::var("NE_CP_API_KEY").ok(),
+            dev_mode,
+        )?;
+        Ok(Self {
             audit,
             provider,
             allow_software_kek: software_kek_allowed(dev_mode, allow_env),
             cp,
+        })
+    }
+
+    fn cp_client_from_values(
+        endpoint: Option<String>,
+        ca_cert: Option<String>,
+        client_cert: Option<String>,
+        client_key: Option<String>,
+        api_key: Option<String>,
+        dev_mode: bool,
+    ) -> Result<Option<ControlPlaneKeyReleaseClient>, SealError> {
+        match (endpoint, ca_cert, client_cert, client_key, api_key) {
+            (None, None, None, None, None) => Ok(None),
+            (Some(endpoint), Some(ca_cert), Some(client_cert), Some(client_key), api_key) => {
+                ControlPlaneKeyReleaseClient::new_mtls(
+                    endpoint,
+                    api_key,
+                    ControlPlaneTlsFiles {
+                        ca_cert: ca_cert.into(),
+                        client_cert: client_cert.into(),
+                        client_key: client_key.into(),
+                    },
+                    Arc::new(wall_clock_now),
+                )
+                .map(Some)
+                .map_err(SealError::from)
+            }
+            (Some(endpoint), None, None, None, Some(api_key)) if dev_mode => {
+                ControlPlaneKeyReleaseClient::new_development(
+                    endpoint,
+                    api_key,
+                    Arc::new(wall_clock_now),
+                )
+                .map(Some)
+                .map_err(SealError::from)
+            }
+            _ => Err(SealError::from(
+                ne_seal::key_release_cp::ControlPlaneError::Configuration(
+                    "invalid key-release transport configuration".into(),
+                ),
+            )),
         }
     }
 
@@ -246,6 +287,72 @@ mod tests {
         (state_dir, sealer)
     }
 
+    #[test]
+    fn control_plane_configuration_matrix_fails_closed() {
+        let tls_path = || Some("/tmp/test.pem".into());
+        assert!(
+            SupervisorSealer::cp_client_from_values(None, None, None, None, None, false)
+                .expect("no configuration is allowed")
+                .is_none()
+        );
+        assert!(
+            SupervisorSealer::cp_client_from_values(
+                Some("https://127.0.0.1:8443/v1".into()),
+                tls_path(),
+                None,
+                tls_path(),
+                None,
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            SupervisorSealer::cp_client_from_values(
+                Some("http://127.0.0.1:8443/v1".into()),
+                None,
+                None,
+                None,
+                Some("development-key".into()),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            SupervisorSealer::cp_client_from_values(
+                Some("http://192.0.2.1:8443/v1".into()),
+                None,
+                None,
+                None,
+                Some("development-key".into()),
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            SupervisorSealer::cp_client_from_values(
+                Some("http://127.0.0.1:8443/v1".into()),
+                None,
+                None,
+                None,
+                Some("development-key".into()),
+                true,
+            )
+            .expect("development configuration")
+            .is_some()
+        );
+        assert!(
+            SupervisorSealer::cp_client_from_values(
+                Some("http://127.0.0.1:8443/v1".into()),
+                tls_path(),
+                tls_path(),
+                tls_path(),
+                None,
+                true,
+            )
+            .is_err()
+        );
+    }
+
     /// CP-client wiring matrix, exercised via the `from_parts` seam so no
     /// process-env mutation is required (edition 2024 marks `set_var`/
     /// `remove_var` `unsafe`, which this workspace forbids at the floor).
@@ -292,11 +399,12 @@ mod tests {
             .expect("bind");
         let addr = dead.local_addr().expect("local_addr");
         drop(dead);
-        let cp = ControlPlaneKeyReleaseClient::new(
+        let cp = ControlPlaneKeyReleaseClient::new_development(
             format!("http://{addr}/v1"),
             "test-key".into(),
             Arc::new(|| 1_700_000_020),
-        );
+        )
+        .expect("loopback development client");
 
         let (_state_b, sealer_b) = make_sealer(true, Some(cp)).await;
         let dir_b = tempfile::tempdir().expect("tempdir");
@@ -330,8 +438,15 @@ mod tests {
     /// under this workspace's `unsafe_code = "deny"` floor).
     #[tokio::test]
     async fn new_without_env_yields_no_cp_client() {
-        let env_set = std::env::var("NE_CP_KEY_RELEASE_ENDPOINT").is_ok()
-            && std::env::var("NE_CP_API_KEY").is_ok();
+        let env_set = [
+            "NE_CP_KEY_RELEASE_ENDPOINT",
+            "NE_CP_TLS_CA_CERT",
+            "NE_CP_TLS_CLIENT_CERT",
+            "NE_CP_TLS_CLIENT_KEY",
+            "NE_CP_API_KEY",
+        ]
+        .iter()
+        .any(|name| std::env::var(name).is_ok());
         if env_set {
             // NE_CP_* env present in this environment; skipping the env-absence
             // assertion (process env cannot be soundly mutated under
@@ -342,7 +457,7 @@ mod tests {
         let audit = AuditLog::open(state_dir.path()).await.expect("audit open");
         let provider: Arc<dyn AttestationProvider> =
             Arc::new(SoftwareProvider::new(audit.signing_key()));
-        let sealer = SupervisorSealer::new(audit, provider, true);
+        let sealer = SupervisorSealer::new(audit, provider, true).expect("sealer configuration");
         let dir = tempfile::tempdir().expect("tempdir");
         let snap = write_plaintext(dir.path()).await;
         let manifest = unsigned_manifest();

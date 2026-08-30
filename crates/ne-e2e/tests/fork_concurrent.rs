@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge fork: KVM-gated concurrent-fork spike + distinct-identity e2e.
+//! KVM-gated concurrent-fork coverage with distinct-identity checks.
 //!
-//! Task 0 (this file's first form) is the GATE: prove that two VMs restored
+//! This test is the gate: prove that two VMs restored
 //! concurrently from ONE snapshot (same guest CID baked into vmstate) are each
 //! reachable over their own vsock UDS and do not interfere. Firecracker vsock
 //! is UDS-based and per-process, so same-CID forks should be independent; this
@@ -51,7 +51,7 @@ async fn wait_for_guest(vsock_uds: &Path) {
 }
 
 /// Build a non-networked LaunchConfig for the given id (CID is always 3 — the
-/// inherited snapshot CID; that's the point of the spike).
+/// inherited snapshot CID; that is the behavior this test covers).
 async fn cfg_for(
     id: &str,
     image_store: &Path,

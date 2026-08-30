@@ -1,6 +1,6 @@
 # NeuronEdge Enclave Python SDK
 
-Python client for the NeuronEdge Enclave Runtime API (gRPC). Phase 1 P0 surface:
+Python client for the NeuronEdge Enclave Runtime API (gRPC). Current surface:
 `Ping`, `CreateWorkspace`, `ExecuteCommand`, `DestroyWorkspace`.
 
 ## Install

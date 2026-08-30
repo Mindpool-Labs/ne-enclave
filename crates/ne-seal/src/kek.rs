@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! HKDF-derived software-fallback KEK and AES-256-GCM DEK wrap/unwrap
-//! (design §5.1, §5.3).
+//! HKDF-derived software-fallback KEK and AES-256-GCM DEK wrap/unwrap.
 
 use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
 use ed25519_dalek::SigningKey;
@@ -19,8 +18,7 @@ const WRAP_DOMAIN: &[u8] = b"ne-enclave-dek-wrap-v1";
 const KEK_INFO: &[u8] = b"ne-enclave-seal-kek-v1";
 
 /// Stable, sorted-key JSON canonical form of the policy (domain-tagged
-/// `POLICY_DOMAIN_TAG`). Hashed into the DEK-wrap AD so a policy swap is
-/// detected (R2).
+/// `POLICY_DOMAIN_TAG`). Hashed into the DEK-wrap AD to reject a policy swap.
 pub fn policy_canonical_bytes(p: &SealingPolicy) -> Vec<u8> {
     let mut map = std::collections::BTreeMap::new();
     map.insert(
@@ -57,19 +55,27 @@ pub fn derive_kek(signing_key: &SigningKey) -> Zeroizing<[u8; 32]> {
     out
 }
 
-fn wrap_ad(snapshot_id: &[u8], manifest_hash: &[u8], policy_hash: &[u8]) -> Vec<u8> {
+#[must_use]
+/// Constructs associated data that binds a DEK wrapping operation to its
+/// snapshot, manifest, and sealing policy.
+pub fn dek_wrap_associated_data(
+    snapshot_id: &str,
+    manifest_hash: &str,
+    policy: &SealingPolicy,
+) -> Vec<u8> {
+    let policy_hash = policy_hash(policy);
     let mut ad = Vec::with_capacity(
         WRAP_DOMAIN.len() + snapshot_id.len() + manifest_hash.len() + policy_hash.len(),
     );
     ad.extend_from_slice(WRAP_DOMAIN);
-    ad.extend_from_slice(snapshot_id);
-    ad.extend_from_slice(manifest_hash);
-    ad.extend_from_slice(policy_hash);
+    ad.extend_from_slice(snapshot_id.as_bytes());
+    ad.extend_from_slice(manifest_hash.as_bytes());
+    ad.extend_from_slice(&policy_hash);
     ad
 }
 
-/// SHA-256 of [`policy_canonical_bytes`]. Hashed into the DEK-wrap AD so a
-/// policy swap is detected (R2).
+/// SHA-256 of [`policy_canonical_bytes`]. Hashed into the DEK-wrap AD to
+/// reject a policy swap.
 pub fn policy_hash(p: &SealingPolicy) -> [u8; 32] {
     use sha2::Digest;
     let mut h = Sha256::new();
@@ -82,7 +88,7 @@ pub fn policy_hash(p: &SealingPolicy) -> [u8; 32] {
 /// AD binds to `snapshot_id` + manifest hash + policy. See
 /// [`wrap_dek_with_nonce`] for the caller-supplied-nonce variant used by the
 /// wasm seam (wasm32 has no host RNG, so the Worker supplies the nonce —
-/// spec §5.4).
+/// the host-supplied nonce contract).
 pub fn wrap_dek(
     dek: &[u8; 32],
     kek: &[u8; 32],
@@ -104,7 +110,7 @@ pub fn wrap_dek(
 /// Wrap the DEK with a CALLER-SUPPLIED 12-byte nonce.
 ///
 /// Used by the wasm seam — wasm32 has no host RNG; the Worker supplies the
-/// nonce via `crypto.getRandomValues` (spec §5.4). The cipher and
+/// nonce via `crypto.getRandomValues`. The cipher and
 /// associated-data construction are identical to [`wrap_dek`]; only the nonce
 /// source differs.
 pub fn wrap_dek_with_nonce(
@@ -116,11 +122,7 @@ pub fn wrap_dek_with_nonce(
     policy: &SealingPolicy,
 ) -> Result<Vec<u8>, SealError> {
     let cipher = Aes256Gcm::new_from_slice(kek).map_err(|e| SealError::BadCrypto(e.to_string()))?;
-    let ad = wrap_ad(
-        snapshot_id.as_bytes(),
-        manifest_hash.as_bytes(),
-        &policy_hash(policy),
-    );
+    let ad = dek_wrap_associated_data(snapshot_id, manifest_hash, policy);
     cipher
         .encrypt(
             nonce.into(),
@@ -147,11 +149,7 @@ pub fn unwrap_dek(
         .as_slice()
         .try_into()
         .map_err(|_| SealError::BadCrypto("wrap nonce not 12 bytes".into()))?;
-    let ad = wrap_ad(
-        snapshot_id.as_bytes(),
-        manifest_hash.as_bytes(),
-        &policy_hash(policy),
-    );
+    let ad = dek_wrap_associated_data(snapshot_id, manifest_hash, policy);
     let pt = cipher
         .decrypt(
             &nonce.into(),
@@ -174,10 +172,10 @@ mod tests {
     use crate::types::{SealingPolicy, SealingTrustAnchor};
     use ne_attestation::ProviderType;
 
-    fn policy() -> SealingPolicy {
+    fn policy(freshness_seconds: u64) -> SealingPolicy {
         SealingPolicy {
             accept_provider_types: vec![ProviderType::Software],
-            freshness_seconds: 300,
+            freshness_seconds,
             trust_anchor: SealingTrustAnchor::Software {
                 expected_signer: [9u8; 32],
             },
@@ -196,10 +194,10 @@ mod tests {
             KekProvider::SoftwareFallback,
             "01S",
             "mh",
-            &policy(),
+            &policy(300),
         )
         .unwrap();
-        let back = unwrap_dek(&env, &kek, "01S", "mh", &policy()).unwrap();
+        let back = unwrap_dek(&env, &kek, "01S", "mh", &policy(300)).unwrap();
         assert_eq!(*back, dek);
     }
 
@@ -213,11 +211,10 @@ mod tests {
             KekProvider::SoftwareFallback,
             "01S",
             "mh",
-            &policy(),
+            &policy(300),
         )
         .unwrap();
-        let mut relaxed = policy();
-        relaxed.freshness_seconds = 9999;
+        let relaxed = policy(9999);
         let err = unwrap_dek(&env, &kek, "01S", "mh", &relaxed).unwrap_err();
         assert!(matches!(err, SealError::CiphertextCorrupt), "{err:?}");
     }
@@ -232,16 +229,16 @@ mod tests {
             KekProvider::SoftwareFallback,
             "01S",
             "mh",
-            &policy(),
+            &policy(300),
         )
         .unwrap();
-        let err = unwrap_dek(&env, &kek, "01S", "OTHER", &policy()).unwrap_err();
+        let err = unwrap_dek(&env, &kek, "01S", "OTHER", &policy(300)).unwrap_err();
         assert!(matches!(err, SealError::CiphertextCorrupt), "{err:?}");
     }
 
     #[test]
     fn policy_canonical_bytes_is_deterministic() {
-        let p = policy();
+        let p = policy(300);
         assert_eq!(policy_canonical_bytes(&p), policy_canonical_bytes(&p));
     }
 
@@ -251,13 +248,28 @@ mod tests {
         let kek = derive_kek(&sk);
         let dek = [77u8; 32];
         let nonce = [42u8; 12];
-        let ct = wrap_dek_with_nonce(&dek, &kek, &nonce, "01S", "mh", &policy()).unwrap();
+        let ct = wrap_dek_with_nonce(&dek, &kek, &nonce, "01S", "mh", &policy(300)).unwrap();
         let env = DekEnvelope {
             kek_provider: KekProvider::SoftwareFallback,
             wrapped_dek: ct,
             wrap_nonce: nonce.to_vec(),
         };
-        let back = unwrap_dek(&env, &kek, "01S", "mh", &policy()).unwrap();
+        let back = unwrap_dek(&env, &kek, "01S", "mh", &policy(300)).unwrap();
         assert_eq!(*back, dek);
+    }
+
+    #[test]
+    fn dek_wrap_associated_data_is_stable_and_field_bound() {
+        let p = policy(300);
+        let manifest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut expected = b"ne-enclave-dek-wrap-v1".to_vec();
+        expected.extend_from_slice(b"01SNAP");
+        expected.extend_from_slice(manifest.as_bytes());
+        expected.extend_from_slice(&policy_hash(&p));
+        assert_eq!(dek_wrap_associated_data("01SNAP", manifest, &p), expected);
+        assert_ne!(
+            dek_wrap_associated_data("01SNAP-other", manifest, &p),
+            expected
+        );
     }
 }

@@ -163,8 +163,8 @@ class RuntimeServicer:
         """Run one command inside a workspace. The API daemon relays the
         call through the supervisor, which opens a vsock connection to
         the guest agent, asks it to spawn the command, and returns the
-        captured output. Phase 1 P0 is unary; server-streaming with
-        stdout/stderr chunks (PRD FR-4.5) lands in P1.
+        captured output. This operation is unary; a later API version can add
+        server-streaming stdout and stderr chunks.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -172,7 +172,7 @@ class RuntimeServicer:
 
     def ListEvents(self, request, context):
         """Read entries from the supervisor's signed audit event log
-        (per-event Ed25519 + Merkle chain). Per FR-11.3 these events
+        (per-event Ed25519 + Merkle chain). These events
         are what the control plane eventually aggregates into its
         tamper-evident store for compliance evidence packaging.
         """
@@ -194,7 +194,7 @@ class RuntimeServicer:
 
     def PauseWorkspace(self, request, context):
         """Pause a running workspace (freeze vCPUs in place).
-        DEFERRED (wedge-6.8): unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
+        DEFERRED: unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -202,7 +202,7 @@ class RuntimeServicer:
 
     def ResumeWorkspace(self, request, context):
         """Resume a previously paused workspace.
-        DEFERRED (wedge-6.8): unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
+        DEFERRED: unsupported on current Firecracker (vsock dies on in-place resume); use snapshot/restore. Server returns Unsupported.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

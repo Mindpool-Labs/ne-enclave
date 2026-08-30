@@ -20,9 +20,18 @@ env:
   BUILDROOT_VERSION: "2025.05"
 
 jobs:
+  public-boundary:
+    name: public information boundary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check public information boundary
+        run: sh scripts/check-public-boundary.sh
+
   gauntlet:
     name: pre-release gauntlet
     runs-on: ubuntu-24.04
+    needs: [public-boundary]
     steps:
       - uses: actions/checkout@v6
       - name: release component contract
@@ -63,6 +72,7 @@ jobs:
   version-check:
     name: version consistency
     runs-on: ubuntu-24.04
+    needs: [public-boundary]
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
@@ -101,7 +111,7 @@ jobs:
   candidate:
     name: build and sign immutable candidate
     runs-on: ubuntu-24.04
-    needs: [gauntlet, version-check]
+    needs: [public-boundary, gauntlet, version-check]
     permissions:
       contents: read
       id-token: write
@@ -275,7 +285,7 @@ jobs:
   standard-artifact-gate:
     name: signed candidate — standard KVM
     runs-on: ubuntu-24.04
-    needs: [candidate]
+    needs: [public-boundary, candidate]
     permissions:
       actions: read
       contents: read
@@ -335,7 +345,7 @@ jobs:
           export BR2_DL_DIR="${HOME}/buildroot-dl"
           export CCACHE_DIR="${HOME}/.buildroot-ccache"
           cargo run -p ne-image -- build \
-            --template phase0-spike \
+            --template standard \
             --buildroot "${HOME}/buildroot"
       - name: Install and exercise the signed standard candidate
         env:
@@ -346,13 +356,13 @@ jobs:
             env NE_VERSION="$GITHUB_REF_NAME" \
             deploy/smoke-install.sh \
             "$GITHUB_WORKSPACE/staging" \
-            "$GITHUB_WORKSPACE/target/images/phase0-spike/images/vmlinux" \
-            "$GITHUB_WORKSPACE/target/images/phase0-spike/images/rootfs.ext4"
+            "$GITHUB_WORKSPACE/target/images/standard/images/vmlinux" \
+            "$GITHUB_WORKSPACE/target/images/standard/images/rootfs.ext4"
 
   azure-confidential-artifact-gate:
     name: signed candidate — Azure confidential DCasv5
     runs-on: ubuntu-24.04
-    needs: [candidate]
+    needs: [public-boundary, candidate]
     permissions:
       actions: read
       contents: read
@@ -590,7 +600,7 @@ jobs:
   github-release:
     name: GitHub Release
     runs-on: ubuntu-24.04
-    needs: [candidate, version-check, standard-artifact-gate, azure-confidential-artifact-gate]
+    needs: [public-boundary, candidate, version-check, standard-artifact-gate, azure-confidential-artifact-gate]
     permissions:
       actions: read
       contents: write
@@ -614,7 +624,7 @@ jobs:
   npm:
     name: npm publish
     runs-on: ubuntu-24.04
-    needs: [candidate, version-check, standard-artifact-gate, azure-confidential-artifact-gate]
+    needs: [public-boundary, candidate, version-check, standard-artifact-gate, azure-confidential-artifact-gate]
     if: vars.ENABLE_SDK_PUBLISH == 'true'
     permissions:
       actions: read
@@ -641,7 +651,7 @@ jobs:
   pypi:
     name: PyPI publish
     runs-on: ubuntu-24.04
-    needs: [candidate, version-check, standard-artifact-gate, azure-confidential-artifact-gate]
+    needs: [public-boundary, candidate, version-check, standard-artifact-gate, azure-confidential-artifact-gate]
     if: vars.ENABLE_SDK_PUBLISH == 'true'
     permissions:
       actions: read

@@ -4,14 +4,14 @@
 
 //! NeuronEdge Enclave privileged supervisor library.
 //!
-//! Per ARCH §4.2 the supervisor owns the privileged side of workspace
+//! The supervisor owns the privileged side of workspace
 //! lifecycle: network namespaces, TAP devices, nftables / eBPF rules,
 //! cgroups v2, Firecracker launch under jailer, snapshot coordination,
 //! and resource reconciliation.
 //!
-//! Phase 0 surface (this commit): typed IPC server on a unix socket,
+//! Current surface: typed IPC server on a Unix socket,
 //! workspace registry, Firecracker launch path under jailer. Network
-//! namespace + TAP + nftables enforcement (ARCH §4.7) land in Phase 1.
+//! namespace + TAP + nftables enforcement land in a later release.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]

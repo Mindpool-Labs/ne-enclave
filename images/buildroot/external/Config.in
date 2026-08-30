@@ -1,4 +1,4 @@
-# BR2_EXTERNAL menu for NeuronEdge Enclave. Phase 1 P0 ships no extra packages
+# BR2_EXTERNAL menu for NeuronEdge Enclave. The base configuration ships no extra packages
 # yet (the guest agent is wired in via a post-build script for the
 # first iteration). When we add a Buildroot package for the agent,
 # its Config.in lands here.

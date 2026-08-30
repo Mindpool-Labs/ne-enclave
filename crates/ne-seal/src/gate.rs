@@ -5,7 +5,7 @@
 //! The attestation gate: reconstruct the borrowed `TrustAnchor` + `VerifyParams`
 //! from a [`SealingPolicy`] on this stack and call `ne_attestation::verify`.
 //!
-//! Design §6. The nonce and `now` are restore-time inputs, not policy-derived.
+//! The nonce and `now` are restore-time inputs, not policy-derived.
 
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use crate::SealError;
 use crate::types::{SealingPolicy, SealingTrustAnchor};
 
 /// Evaluate the gate: `verify()` must be `Verified` else `AttestationGateDenied`.
-/// Pure; no network (NFR-6.5 — the underlying `verify` is pure/offline).
+/// Pure; no network. The underlying `verify` is pure and offline.
 pub fn verify_against_policy(
     policy: &SealingPolicy,
     evidence: &Evidence,
@@ -79,7 +79,7 @@ fn outcome_to_result(outcome: VerifyOutcome) -> Result<(), SealError> {
     match outcome {
         VerifyOutcome::Verified => Ok(()),
         VerifyOutcome::Failed(reason) => {
-            // Task 2 re-tightened AttestationGateDenied to FailReason.
+            // The error type carries the specific attestation failure reason.
             Err(SealError::AttestationGateDenied(reason))
         }
     }

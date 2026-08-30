@@ -274,7 +274,7 @@ fn harden_entry_policy(path: &Path, _directory: bool, mode: u32, _fakeroot: bool
 }
 
 /// The default guest image shipped with this release. Digests are filled
-/// from the CI-published image asset (Task 15 sets these to real values).
+/// from the CI-published image asset (release automation sets these to real values).
 pub struct ImagePin {
     /// Base URL the kernel + rootfs assets are downloaded from.
     pub url_base: &'static str,
@@ -287,7 +287,7 @@ pub struct ImagePin {
 /// The default guest image pinned for this build (placeholder digests until
 /// CI publishes the real asset; `fetch_default_image` guards against them).
 pub const DEFAULT_IMAGE: ImagePin = ImagePin {
-    // Replace with the real release asset URL + digests in Task 15.
+    // Replace with the real release asset URL and digests before release.
     url_base: "https://github.com/Mindpool-Labs/ne-enclave/releases/latest/download",
     kernel_sha256: "PLACEHOLDER_KERNEL_SHA256",
     rootfs_sha256: "PLACEHOLDER_ROOTFS_SHA256",

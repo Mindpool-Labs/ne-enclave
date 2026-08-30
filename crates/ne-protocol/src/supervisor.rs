@@ -4,7 +4,7 @@
 
 //! Typed IPC schema between `ne-api` and `ne-supervisor`.
 //!
-//! Per ARCH §4.2 the supervisor's command surface is small, typed, and
+//! The supervisor's command surface is small, typed, and
 //! explicit; no free-form strings reach the privileged side.
 //!
 //! Wire format on the unix domain socket is newline-delimited JSON: one
@@ -35,7 +35,7 @@ pub const MAX_INLINE_FILE_BYTES: usize = 10 * 1024 * 1024;
 /// Operations the supervisor accepts.
 ///
 /// `#[non_exhaustive]` ensures consumers handle future variants safely.
-/// New operations land via RFC per ARCH §17.6 (service inventory lock).
+/// New operations require an RFC and the service-inventory lock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -116,7 +116,7 @@ impl SupervisorRequest {
 
 /// Workspace launch specification.
 ///
-/// Sealed snapshots and attestation policy live in Phase 2.
+/// Sealed snapshots and attestation policy are outside the current request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWorkspaceRequest {
     /// Opaque workspace identifier. The caller (API daemon) picks this;
@@ -140,11 +140,11 @@ pub struct CreateWorkspaceRequest {
     /// Optional kernel boot args; defaults to a quiet console=ttyS0
     /// setup when `None`.
     pub kernel_boot_args: Option<String>,
-    /// Optional network configuration. `None` preserves the Phase 0
+    /// Optional network configuration. `None` preserves the existing
     /// behavior — workspace boots with no network device at all and
     /// only the vsock guest-agent channel is reachable. `Some(_)`
     /// asks the supervisor to provision a per-workspace netns + TAP
-    /// + veth + NAT before launching Firecracker (ARCH §4.7).
+    /// + veth + NAT before launching Firecracker.
     ///
     /// `default` keeps older clients deserializing cleanly against
     /// newer supervisors.
@@ -160,7 +160,7 @@ pub struct CreateWorkspaceRequest {
 
 /// Per-workspace network policy.
 ///
-/// Phase 1 P0 first cut ships a single toggle — future iterations add
+/// The current implementation ships a single toggle — later versions can add
 /// allow CIDRs / ports / hostname allowlists / DNS overrides without
 /// breaking the wire shape (`#[serde(default)]` on every new field).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -174,7 +174,7 @@ pub struct NetworkConfig {
     /// Allowlist of destination CIDRs the workspace is permitted to
     /// reach. Independent of [`Self::enable_egress`]; controls the
     /// per-workspace FORWARD chain. An empty list combined with
-    /// `enable_egress = true` allows all destinations (the Phase 1 P0
+    /// `enable_egress = true` allows all destinations (the current
     /// open-egress shape). An empty list with `enable_egress = false`
     /// blocks every outbound destination — workspace can still talk
     /// to its own netns and to the host veth, but no further.
@@ -197,10 +197,10 @@ pub struct NetworkConfig {
     /// router (HTTP body PII scanning). The supervisor spawns one
     /// `ne-privacy-router` per workspace inside the netns and
     /// installs iptables DNAT to redirect TCP/80 egress to it. The
-    /// PII policy itself is host-global in Phase 1 P0 (operator-set
+    /// PII policy itself is host-global (operator-set
     /// via supervisor CLI) — this struct stays empty for now and will
     /// grow per-workspace overrides (`policy: Option<PiiPolicy>`) in
-    /// Phase 2 without breaking existing clients.
+    /// a later compatible extension without breaking existing clients.
     #[serde(default)]
     pub privacy_router: Option<PrivacyRouterConfig>,
     /// Guest ports exposed to host-based ingress routing
@@ -213,9 +213,9 @@ pub struct NetworkConfig {
 
 /// Per-workspace privacy-router opt-in marker.
 ///
-/// Empty in Phase 1 P0: the operator-set global YAML policy applies
+/// Empty today: the operator-set global YAML policy applies
 /// to every workspace that opts in. Kept as a struct (rather than a
-/// bool) so Phase 2 can add fields (`policy`, `redirect_ports`, etc.)
+/// bool) so later API versions can add fields (`policy`, `redirect_ports`, etc.)
 /// without an SDK migration — all future fields will be
 /// `#[serde(default)]` so older clients sending `{}` stay compatible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -306,14 +306,15 @@ pub struct WorkspaceCreated {
     pub network: Option<WorkspaceNetwork>,
     /// Which execution backend the workspace landed on. `"firecracker"`
     /// (the standard tier, default when omitted for back-compat) or
-    /// `"openshell"` (the confidential tier, single-CVM-direct, B). Added
-    /// additively (R1) so existing clients deserialize unchanged.
+    /// `"openshell"` (the confidential tier, single-CVM-direct, B). It was
+    /// added additively so existing clients deserialize unchanged.
     #[serde(default)]
     pub exec_backend: Option<String>,
     /// On the **confidential tier** (`exec_backend == "openshell"`): the
     /// `host:port` SSH address the supervisor uses to control the OpenShell
     /// sandbox. `None` on the standard tier (Firecracker uses
-    /// `vsock_host_socket` instead). Added additively (R1).
+    /// `vsock_host_socket` instead). This optional field preserves
+    /// compatibility with existing clients.
     #[serde(default)]
     pub control_socket: Option<String>,
 }
@@ -481,8 +482,8 @@ pub struct TerminateRequest {
 /// `ne-guest-agent` listening inside the microVM, and returns the
 /// guest's reply as a [`SupervisorResponse::CommandCompleted`].
 ///
-/// Phase 1 P0 is unary (full stdout/stderr buffer returned in one
-/// shot). Streaming with backpressure per PRD FR-4.5 lands in P1.
+/// This operation is unary (full stdout/stderr buffer returned in one
+/// shot). A later API version can add streaming with backpressure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCommandRequest {
     /// The workspace the guest agent runs inside.
@@ -506,16 +507,16 @@ pub struct RunCommandRequest {
 pub struct CommandCompleted {
     /// Echoes the [`RunCommandRequest::workspace_id`].
     pub workspace_id: String,
-    /// Captured stdout (lossy UTF-8; Phase 1 P0 buffer is full).
+    /// Captured stdout (lossy UTF-8; the current buffer is full).
     pub stdout: String,
     /// Captured stderr (same conversion as `stdout`).
     pub stderr: String,
-    /// Process exit code (`-1` if terminated by signal in Phase 1 P0).
+    /// Process exit code (`-1` if terminated by signal today).
     pub exit_code: i32,
     /// Wall-clock duration the command ran for, milliseconds.
     pub elapsed_ms: u64,
     /// True if the guest truncated stdout or stderr at its per-stream cap
-    /// (audit S3-F2). Relayed verbatim from the guest response.
+    /// Relayed verbatim from the guest response.
     /// `#[serde(default)]` for additive wire-compat across version skew.
     #[serde(default)]
     pub truncated: bool,
@@ -723,7 +724,7 @@ pub enum SupervisorErrorKind {
     /// configured with.
     TierNotFound,
     /// The supervisor is at its configured workspace-count ceiling and cannot
-    /// admit another workspace (host-exhaustion backstop; audit O3).
+    /// admit another workspace (host-exhaustion backstop).
     CapacityExceeded,
     /// The confidential profile already has its single active or creating
     /// workspace slot held.

@@ -4,7 +4,7 @@
 
 //! Signed audit event log.
 //!
-//! Implements PRD §17 row 10's "per-event Ed25519 + Merkle chain"
+//! Implements the per-event Ed25519 + Merkle-chain audit design.
 //! decision. Cross-platform — the supervisor emits events on every
 //! op regardless of whether the underlying Firecracker launch is
 //! reachable.

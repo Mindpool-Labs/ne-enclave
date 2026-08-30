@@ -28,7 +28,6 @@ Cargo.lock.bak
 
 # Internal agent specs, plans, and isolated working trees
 /.superpowers/
-/docs/superpowers/
 /.worktrees/
 /worktrees/
 

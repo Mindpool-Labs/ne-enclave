@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge 5.5: host-side timeout propagation through the three vsock
+//! Host-side timeout propagation through the three vsock
 //! RPC helpers. Uses a fake `UnixListener` server that completes the
 //! CONNECT handshake and then hangs, forcing the host's
 //! `tokio::time::timeout` to fire.

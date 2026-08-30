@@ -14,7 +14,7 @@
 //! Run as root on a provisioned Azure confidential VM:
 //! ```sh
 //! cargo test -p ne-e2e --features confidential-cvm \
-//!   --test r1_single_cvm_direct -- --ignored --nocapture --test-threads=1
+//!   --test single_cvm_direct -- --ignored --nocapture --test-threads=1
 //! ```
 
 #![cfg(all(target_os = "linux", feature = "confidential-cvm"))]
@@ -114,7 +114,7 @@ impl Drop for WorkspaceCleanup {
 
 #[test]
 #[ignore = "requires the installed confidential-azure release candidate on Azure DCasv5"]
-fn r1_single_cvm_direct_round_trip() {
+fn single_cvm_direct_round_trip() {
     assert!(
         !std::path::Path::new("/dev/kvm").exists(),
         "Azure confidential profile must not depend on nested KVM"

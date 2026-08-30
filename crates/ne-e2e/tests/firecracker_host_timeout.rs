@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge 5.5: confirms that the host's 30-second cap fires when a guest
+//! Confirms that the host's 30-second cap fires when a guest
 //! command outruns the supplied `timeout_ms`. Run with:
 //!
 //! ```sh

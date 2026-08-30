@@ -4,7 +4,7 @@
 
 //! Signed audit event chain types.
 //!
-//! Per PRD §17 row 10 the supervisor emits per-event Ed25519
+//! The supervisor emits per-event Ed25519
 //! signatures + maintains a Merkle chain over the log. Each
 //! [`AuditEvent`] carries:
 //!
@@ -455,7 +455,7 @@ pub enum EventType {
     AttestationReplayed,
 }
 
-/// Request shape for `ListEvents`. Phase 1 P0 first cut supports
+/// Request shape for `ListEvents`. The current implementation supports
 /// filter-by-workspace + a soft `limit`. Cursor-based pagination
 /// (over `chain_index`) lands once the volume warrants it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn attestation_event_types_round_trip_through_snake_case() {
-        // Pin the wire encoding. `AttestationEvidenceIssued` (audit S1-F1,
+        // Pin the wire encoding. `AttestationEvidenceIssued`,
         // renamed from `AttestationVerified`) records host-side issuance, not
         // caller verification.
         for (variant, expected) in [

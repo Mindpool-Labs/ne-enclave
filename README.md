@@ -4,7 +4,7 @@
 
 NeuronEdge Enclave joined Mindpool in July 2026. It remains a standalone, Apache-2.0 execution boundary for AI agents — see https://neuronedge.ai.
 
-Autonomous agents run code, install packages, call APIs, and touch sensitive data. NeuronEdge Enclave gives each agent a governed sandbox: a Firecracker microVM with its own kernel in the supported standard profile, or an OpenShell sandbox inside an SEV-SNP CVM in the Preview Azure confidential profile.
+Autonomous agents run code, install packages, call APIs, and touch sensitive data. NeuronEdge Enclave gives each agent a governed sandbox: an upstream Firecracker microVM with its own kernel in the supported standard profile, or an OpenShell sandbox directly inside an SEV-SNP CVM in the Preview Azure confidential profile.
 
 Apache-2.0. Self-hosted. Rust top-to-bottom.
 
@@ -23,15 +23,15 @@ Agent frameworks (LangChain, Mastra, CrewAI, custom) need somewhere safe to exec
 - **Managed sandbox clouds (E2B, Modal)** — solve isolation but move your data to someone else's infrastructure. Regulated enterprises (finance, healthcare, government) can't approve them: data residency, DPAs, attestation gaps.
 - **No boundary** — agents run on the developer's laptop or a shared CI runner. The blast radius of a compromised agent is the whole machine.
 
-NeuronEdge Enclave is the **fourth option**: a self-hosted runtime where standard workspaces get their own kernel through Firecracker. A separate Preview profile runs one sensitive workspace inside an Azure SEV-SNP CVM with OpenShell shared-kernel isolation and hardware-rooted evidence for the outer CVM.
+NeuronEdge Enclave is the **fourth option**: a self-hosted runtime where standard workspaces get their own kernel through upstream Firecracker. A separate Preview profile runs one sensitive workspace directly inside an Azure SEV-SNP CVM with OpenShell shared-kernel isolation and hardware-rooted evidence for the outer CVM.
 
-**The wedge:** *an evidence-backed execution boundary, deployable on customer-owned infrastructure, Apache-2.0.*
+**Core value:** *an evidence-backed execution boundary, deployable on customer-owned infrastructure, Apache-2.0.*
 
 ---
 
 ## What it is
 
-A Rust runtime that creates, controls, snapshots, and destroys Firecracker-backed microVM sandboxes for agent workloads. The standard profile includes runtime-owned networking, privacy routing, and signed audit controls. The confidential profile uses a pinned [OpenShell](https://github.com/Mindpool-Labs/OpenShell) sandbox inside the CVM. OpenShell's package supply-chain engine is not wired into standard workspaces.
+A Rust runtime that creates, controls, snapshots, and destroys upstream-Firecracker-backed microVM sandboxes for agent workloads. The standard profile includes runtime-owned networking, privacy routing, and signed audit controls. The confidential profile uses a pinned [OpenShell](https://github.com/Mindpool-Labs/OpenShell) sandbox directly inside the CVM. OpenShell's package supply-chain engine is not wired into standard workspaces.
 
 | Capability | Maturity |
 |---|---|

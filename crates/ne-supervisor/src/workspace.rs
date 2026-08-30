@@ -97,13 +97,13 @@ use crate::network::NetworkController;
 #[derive(Debug)]
 #[cfg(target_os = "linux")]
 pub enum WorkspaceExec {
-    /// Standard tier: a Firecracker microVM under jailer.
+    /// Standard tier: an upstream Firecracker microVM under jailer.
     ///
     /// Boxed (as is `OpenShell`): the payloads are hundreds of bytes (clippy
     /// `large_enum_variant`), and each registry entry is created once and
     /// then only looked up by reference.
     Firecracker(Box<crate::firecracker::Instance>),
-    /// Confidential tier (B): an OpenShell sandbox spawned in-process in the
+    /// Confidential tier (B): an OpenShell sandbox runs directly in the
     /// attested CVM. Only present under `feature = "confidential-cvm"`.
     #[cfg(feature = "confidential-cvm")]
     OpenShell(Box<ConfidentialWorkspace>),
@@ -250,7 +250,7 @@ pub struct WorkspaceManagerConfig {
 }
 
 impl WorkspaceManagerConfig {
-    /// Phase 0 defaults matched to a standard single-host install layout.
+    /// Defaults match a standard single-host install layout.
     #[must_use]
     pub fn dev_defaults() -> Self {
         Self {
@@ -283,12 +283,12 @@ pub struct WorkspaceManager {
     cfg: WorkspaceManagerConfig,
     #[allow(dead_code)]
     audit: AuditLog,
-    /// Admission ceiling on concurrent registered workspaces (audit O3).
+    /// Admission ceiling on concurrent registered workspaces.
     /// Resolved (0=auto already applied) at the arg→config→manager
     /// boundary in `serve()`.
     #[allow(dead_code)]
     max_workspaces: usize,
-    /// Admission ceiling on a single workspace's `mem_size_mib` (audit O3).
+    /// Admission ceiling on a single workspace's `mem_size_mib`.
     /// Resolved the same way as `max_workspaces`.
     #[allow(dead_code)]
     max_workspace_mem_mib: u32,
@@ -303,7 +303,7 @@ pub struct WorkspaceManager {
     refill_rx: Mutex<Option<mpsc::Receiver<()>>>,
     #[cfg(target_os = "linux")]
     ingress: Arc<ne_ingress::IngressRegistry>,
-    /// Active attestation provider (software fallback in this wedge).
+    /// Active attestation provider (software fallback in this configuration).
     #[cfg(target_os = "linux")]
     attestation: Arc<dyn ne_attestation::AttestationProvider>,
     /// Per-workspace bounded ring of recently-seen attestation nonces
@@ -333,10 +333,12 @@ impl WorkspaceManager {
 
 /// Shared atomic set behind per-workspace lifecycle leases.
 #[derive(Debug, Default)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct LifecycleClaims {
     ids: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl LifecycleClaims {
     fn claim(&self, id: &str) -> Option<LifecycleLease<'_>> {
         let inserted = self
@@ -352,6 +354,7 @@ impl LifecycleClaims {
 }
 
 /// RAII lease on a workspace id for a path-owning lifecycle operation.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct LifecycleLease<'a> {
     claims: &'a LifecycleClaims,
     id: String,
@@ -549,7 +552,7 @@ impl WorkspaceManager {
 #[cfg(not(target_os = "linux"))]
 impl WorkspaceManager {
     /// Construct an empty registry that returns `Unsupported` for every
-    /// workspace op (non-Linux build, PRD NFR-5.1).
+    /// workspace operation on a non-Linux build.
     ///
     /// Returns `Result` for signature parity with the Linux implementation;
     /// provider construction happens before the manager is created.
@@ -579,7 +582,7 @@ impl WorkspaceManager {
     pub async fn create(&self, _req: CreateWorkspaceRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "CreateWorkspace requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "CreateWorkspace requires Linux + KVM".to_string(),
         }
     }
 
@@ -588,7 +591,7 @@ impl WorkspaceManager {
     pub async fn terminate(&self, _req: TerminateRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "Terminate requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "Terminate requires Linux + KVM".to_string(),
         }
     }
 
@@ -597,7 +600,7 @@ impl WorkspaceManager {
     pub async fn run_command(&self, _req: RunCommandRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "RunCommand requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "RunCommand requires Linux + KVM".to_string(),
         }
     }
 
@@ -606,7 +609,7 @@ impl WorkspaceManager {
     pub async fn write_file(&self, _req: WriteFileRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "WriteFile requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "WriteFile requires Linux + KVM".to_string(),
         }
     }
 
@@ -615,12 +618,12 @@ impl WorkspaceManager {
     pub async fn read_file(&self, _req: ReadFileRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "ReadFile requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "ReadFile requires Linux + KVM".to_string(),
         }
     }
 
     /// Always returns [`SupervisorErrorKind::Unsupported`] on non-Linux.
-    /// Also deferred on Linux (wedge-6.8): vsock dies on in-place resume; use snapshot/restore.
+    /// Also deferred on Linux: vsock dies on in-place resume; use snapshot/restore.
     #[allow(clippy::unused_async)]
     pub async fn pause(&self, _req: WorkspaceRef) -> SupervisorResponse {
         SupervisorResponse::Error {
@@ -633,7 +636,7 @@ impl WorkspaceManager {
     }
 
     /// Always returns [`SupervisorErrorKind::Unsupported`] on non-Linux.
-    /// Also deferred on Linux (wedge-6.8): vsock dies on in-place resume; use snapshot/restore.
+    /// Also deferred on Linux: vsock dies on in-place resume; use snapshot/restore.
     #[allow(clippy::unused_async)]
     pub async fn resume(&self, _req: WorkspaceRef) -> SupervisorResponse {
         SupervisorResponse::Error {
@@ -650,7 +653,7 @@ impl WorkspaceManager {
     pub async fn snapshot(&self, _req: SnapshotRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "SnapshotWorkspace requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "SnapshotWorkspace requires Linux + KVM".to_string(),
         }
     }
 
@@ -659,7 +662,7 @@ impl WorkspaceManager {
     pub async fn restore(&self, _req: RestoreRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "RestoreWorkspace requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "RestoreWorkspace requires Linux + KVM".to_string(),
         }
     }
 
@@ -668,7 +671,7 @@ impl WorkspaceManager {
     pub async fn fork(&self, _req: ForkRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "ForkWorkspace requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "ForkWorkspace requires Linux + KVM".to_string(),
         }
     }
 
@@ -680,7 +683,7 @@ impl WorkspaceManager {
     ) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "warm pool requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "warm pool requires Linux + KVM".to_string(),
         }
     }
 
@@ -689,7 +692,7 @@ impl WorkspaceManager {
     pub async fn expose_port(&self, _req: ExposePortRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "ExposePort requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "ExposePort requires Linux + KVM".to_string(),
         }
     }
 
@@ -698,7 +701,7 @@ impl WorkspaceManager {
     pub async fn unexpose_port(&self, _req: UnexposePortRequest) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "UnexposePort requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "UnexposePort requires Linux + KVM".to_string(),
         }
     }
 
@@ -710,7 +713,7 @@ impl WorkspaceManager {
     ) -> SupervisorResponse {
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
-            message: "GetAttestationEvidence requires Linux + KVM (PRD NFR-5.1)".to_string(),
+            message: "GetAttestationEvidence requires Linux + KVM".to_string(),
         }
     }
 }
@@ -794,7 +797,7 @@ impl WorkspaceManager {
     /// `instances` PLUS warm-pool members (idle ready members and in-flight
     /// provisions — both are real, memory-consuming FC processes even though
     /// they are not in `instances` yet). This is the figure the
-    /// `max_workspaces` exhaustion backstop bounds (audit O3): counting only
+    /// `max_workspaces` exhaustion backstop bounds: counting only
     /// `instances` would let a configured pool run the host `target_size` VMs
     /// past the ceiling.
     ///
@@ -820,7 +823,7 @@ impl WorkspaceManager {
             self.cfg.execution_profile,
             ne_protocol::profile::ExecutionProfile::ConfidentialAzure
         );
-        // Admission control (audit O3): reject before reserving anything —
+        // Admission control: reject before reserving anything —
         // ahead of even the tier dispatch below, so both the cold-boot and
         // warm-pool paths are covered (both flow through `create`).
         if !confidential && req.mem_size_mib > self.max_workspace_mem_mib {
@@ -1918,11 +1921,12 @@ impl WorkspaceManager {
         }
     }
 
-    /// DEFERRED (wedge-6.8): in-place pause/resume is unsupported on current
+    /// DEFERRED: in-place pause/resume is unsupported on current
     /// Firecracker — the vsock control channel does not survive an in-place
     /// `PATCH /vm Resumed` (the resumed guest is unreachable over vsock). Use
-    /// snapshot/restore (fresh process) instead, which works. Tracked for a
-    /// future Firecracker fork patch. `WorkspaceManager::snapshot` still uses
+    /// snapshot/restore (fresh process) instead, which works. Any future
+    /// investigation must use an upstream-compatible Firecracker path.
+    /// `WorkspaceManager::snapshot` still uses
     /// the low-level `crate::firecracker::pause`/`resume` directly; only this
     /// public API is gated.
     // `async` kept (no await while deferred) so the dispatcher contract in
@@ -1940,7 +1944,7 @@ impl WorkspaceManager {
         }
     }
 
-    /// DEFERRED (wedge-6.8): see [`Self::pause`].
+    /// DEFERRED: see [`Self::pause`].
     #[allow(clippy::unused_async)]
     pub async fn resume(&self, ws_ref: WorkspaceRef) -> SupervisorResponse {
         let _ = &ws_ref;
@@ -1955,7 +1959,7 @@ impl WorkspaceManager {
 
     /// Snapshot a workspace.
     ///
-    /// Locking strategy (audit C2): the global `instances` mutex is held only
+    /// Locking strategy: the global `instances` mutex is held only
     /// for the brief lookup/validate/capture step — where the FC socket + chroot
     /// paths and metadata are copied out and the transient `Snapshotting` state
     /// is set — then the guard is DROPPED. The pause → memory-dump → resume
@@ -1963,7 +1967,7 @@ impl WorkspaceManager {
     /// captured paths, so it no longer head-of-line-blocks every other
     /// supervisor op. The lock is re-acquired only briefly at finalize to
     /// resolve the tracked state back to `Running`/`Paused`, guarded by an
-    /// existence re-check (the wedge-7.1 resurrection guard): if the workspace
+    /// existence re-check (the resurrection guard): if the workspace
     /// was terminated mid-dump it is NOT reinserted. The subsequent copy-out,
     /// hashing, and signing need only the artifact paths and stay unlocked.
     pub async fn snapshot(&self, req: SnapshotRequest) -> SupervisorResponse {
@@ -1984,8 +1988,7 @@ impl WorkspaceManager {
         // paths + metadata, set the transient `Snapshotting` state, then DROP
         // the guard. The multi-GiB memory dump (Steps 2-4) runs entirely
         // UNLOCKED against the captured paths, so it no longer head-of-line-
-        // blocks every other supervisor op on the global `instances` mutex
-        // (audit C2).
+        // blocks every other supervisor operation on the global `instances` mutex.
         let (
             source_ws_id,
             boot_id,
@@ -2010,7 +2013,7 @@ impl WorkspaceManager {
             };
             // Snapshot is Firecracker-vmstate-coupled; the confidential tier
             // (OpenShell) returns Unsupported in B v1 (a process-checkpoint
-            // format is a later wedge). Unwrap the FC variant for the rest.
+            // format is a later release). Unwrap the FC variant for the rest.
             #[cfg(not(feature = "confidential-cvm"))]
             let WorkspaceExec::Firecracker(instance) = exec;
             #[cfg(feature = "confidential-cvm")]
@@ -2378,7 +2381,7 @@ impl WorkspaceManager {
     /// Re-acquire the registry lock and resolve `workspace_id`'s lifecycle
     /// state after an unlocked snapshot window — but ONLY if the entry still
     /// refers to the SAME boot this snapshot captured (identity-token check;
-    /// the wedge-7.1 resurrection guard, hardened against ABA).
+    /// the resurrection guard, hardened against ABA).
     ///
     /// Existence alone is NOT enough: the FC socket/chroot paths are fully
     /// id-derived. The lifecycle lease now blocks a terminate→recreate ABA
@@ -2510,7 +2513,7 @@ impl WorkspaceManager {
             crate::snapshot::SnapshotRestoreError::Image(error) => image_error_response(error),
         })?;
 
-        // Admission control (audit O3): validate the memory size the
+        // Admission control: validate the memory size the
         // snapshot will boot at before spawning anything. `restore`/`fork`
         // requests don't carry a client-supplied `mem_size_mib` (unlike
         // `create`) — the size comes from the pinned manifest — so this is
@@ -2555,7 +2558,7 @@ impl WorkspaceManager {
 
     /// Claim `workspace_id` for a cold boot, failing fast with
     /// `WorkspaceAlreadyExists` if another cold boot of the same id is in
-    /// flight or the id is already registered (audit C1 follow-through).
+    /// flight or the id is already registered (to avoid cross-instance interference).
     ///
     /// Why: the boot runs for seconds outside the registry lock and the
     /// jailer chroot is derived from the caller id, so two concurrent same-id
@@ -2638,7 +2641,7 @@ impl WorkspaceManager {
     /// Live-snapshot hot-swap: replace a just-snapshotted (now frozen/paused) source
     /// with a fresh Firecracker restored from that same snapshot, so the source comes
     /// back Running + vsock-reachable (an in-place resume would leave it vsock-dead —
-    /// the deferred wedge-6.8 limitation). Same identity is intentional: this is the
+    /// the deferred limitation). Same identity is intentional: this is the
     /// *same* workspace continuing, NOT a fork — so NO `ResetIdentity`.
     ///
     /// On success: the registry entry for `source_ws_id` now points at the new
@@ -2867,7 +2870,7 @@ impl WorkspaceManager {
         };
         let me = Arc::clone(self);
         tokio::spawn(async move {
-            // Admission control (audit O3): pool refill boots real FC VMs, so
+            // Admission control: pool refill boots real FC VMs, so
             // it must respect the same combined instances+pool ceiling as the
             // request paths. At (or over) the ceiling, DEFER — skip this tick
             // with a warn rather than erroring; the next tick / kick retries
@@ -2994,7 +2997,7 @@ impl WorkspaceManager {
 
     /// Restore a fresh workspace from a snapshot artifact.
     pub async fn restore(&self, req: RestoreRequest) -> SupervisorResponse {
-        // Admission control (audit O3): same soft ceiling as `create`, on the
+        // Admission control: same soft ceiling as `create`, on the
         // combined instances+warm-pool live-VM count — restore also boots a
         // net-new VM. No mem_size_mib guard here: `RestoreRequest` carries no
         // client-supplied memory size (it comes from the pinned snapshot
@@ -3086,7 +3089,7 @@ impl WorkspaceManager {
     /// guest is unreachable or `ResetIdentity` fails, the freshly-booted VM
     /// is torn down and `ForkFailed` is returned.
     pub async fn fork(&self, req: ForkRequest) -> SupervisorResponse {
-        // Admission control (audit O3): same soft ceiling as `create`, on the
+        // Admission control: same soft ceiling as `create`, on the
         // combined instances+warm-pool live-VM count — fork also boots a
         // net-new VM. No mem_size_mib guard here for the same reason as
         // `restore`: `ForkRequest` carries no client-supplied memory size; it
@@ -3297,7 +3300,7 @@ impl WorkspaceManager {
                     WorkspaceExec::Firecracker(inst) => Some(measure_config(inst)),
                     // The confidential tier (B) does not derive a per-workspace
                     // measurement from the launch config — its attestation is the
-                    // host-CVM launch evidence (Wedge 5), surfaced separately. Use
+                    // host-CVM launch evidence, surfaced separately. Use
                     // a zeroed placeholder here; a per-backend measurement fn is a
                     // follow-up.
                     #[cfg(feature = "confidential-cvm")]
@@ -3726,7 +3729,7 @@ mod tests {
         }
     }
 
-    /// The ABA guard (audit C2 follow-through): a stale snapshot finalize —
+    /// The ABA guard: a stale snapshot finalize —
     /// carrying the boot token of a terminated boot — must be a strict no-op
     /// on a replacement workspace registered under the same id. Existence
     /// alone must not be enough to mutate the entry.
@@ -4004,7 +4007,7 @@ mod tests {
 
     #[tokio::test]
     async fn pause_returns_unsupported_deferred() {
-        // Public pause/resume is deferred (wedge-6.8): in-place Firecracker
+        // Public pause/resume is deferred: in-place Firecracker
         // resume kills the vsock control channel. Both APIs must return
         // Unsupported regardless of whether the workspace exists.
         let mgr = test_manager().await;

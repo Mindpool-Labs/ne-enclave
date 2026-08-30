@@ -8,7 +8,7 @@
 //! runs it through the PII engine, then either forwards the (possibly
 //! redacted) body to the upstream destination or returns a 403 to the
 //! client. The upstream destination is taken from the inbound `Host:`
-//! header — the iptables DNAT inserted by Wedge 5.3 rewrites the
+//! header — the iptables DNAT rule rewrites the
 //! kernel-level destination to the proxy without touching the
 //! application-level URI, so `Host:` still names the workspace's
 //! intended endpoint.
@@ -16,9 +16,9 @@
 //! The module is split into a small pure core ([`scan_body`]) and the
 //! hyper-driven I/O ([`serve`], [`handle_request`], [`forward`]) so the
 //! detection / redaction / block branches can be unit-tested without
-//! standing up a TCP listener. Wedge 5.2 covers the request-direction
+//! standing up a TCP listener. This implementation covers the request-direction
 //! path only; response-direction scanning is intentionally out of scope
-//! for Phase 1 P0 (the model output that comes back is not customer
+//! for the current implementation (the model output that comes back is not customer
 //! PII).
 
 use std::convert::Infallible;
@@ -53,7 +53,7 @@ pub enum ScanOutcome {
     /// Body is unmodified — forward as-is.
     Passthrough,
     /// Detections in audit mode — body unmodified, count surfaced
-    /// for the eventual audit chain (Wedge 5.5).
+    /// for the eventual audit chain.
     Audited {
         /// Number of detections in this body.
         count: usize,
@@ -108,7 +108,7 @@ pub struct ProxyState {
 
 impl ProxyState {
     /// Build new state with a freshly-constructed HTTP client (HTTP-only,
-    /// matching the P0 cleartext scope). Audit-stdout emission defaults
+    /// matching the cleartext-only scope). Audit-stdout emission defaults
     /// off; the supervisor flips it on via [`Self::with_audit_stdout`]
     /// when spawning the binary inside a workspace netns so each
     /// decision lands as a JSON line in the signed audit chain.

@@ -4,7 +4,7 @@
 
 //! Thin client for the privileged supervisor's NDJSON IPC.
 //!
-//! Phase 1 P0 first cut: one connection per request. A connection
+//! The current implementation uses one connection per request. A connection
 //! pool + reconnect-with-backoff lands once we have more than a
 //! handful of ops in flight per second.
 

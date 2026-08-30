@@ -661,7 +661,7 @@ fn sandbox_identity_status() -> std::result::Result<(), String> {
 
 /// Resolve the uid of a user that was just created (or already existed).
 /// Falls back to 0 on non-Linux or lookup failure (root — will be corrected
-/// by the chown step in Task 12).
+/// by the ownership-adjustment step).
 #[cfg(target_os = "linux")]
 fn resolve_uid_after_creation(name: &str) -> u32 {
     nix::unistd::User::from_name(name)

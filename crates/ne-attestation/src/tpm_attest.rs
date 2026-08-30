@@ -11,7 +11,7 @@
 //! request.
 //!
 //! ## Layout (TPM 2.0 Part 2; confirmed against a real `tpm2_quote` on
-//! `ne-snp-azure`, research note §6)
+//! `ne-snp-azure`)
 //!
 //! `tpm2_quote -m <file>` writes the `TPM2B_ATTEST` as a `TPMS_ATTEST` body —
 //! `tpm2-tools` strips the outer `u16` size prefix. For robustness the parser
@@ -115,7 +115,7 @@ pub fn parse_tpm2b_attest(msg: &[u8]) -> Option<TpmAttest> {
 mod tests {
     use super::*;
 
-    // A real `tpm2_quote` output from ne-snp-azure (research note §6), captured
+    // A real `tpm2_quote` output from ne-snp-azure, captured
     // with a 32-byte qualifying-data nonce of 0x42. This is the TPMS_ATTEST body
     // (tpm2_quote -m writes the body without the outer TPM2B_ATTEST u16 prefix):
     //   magic=0xff544347, type=0x8018 (QUOTE), qualifiedSigner=34B (the AK Name),

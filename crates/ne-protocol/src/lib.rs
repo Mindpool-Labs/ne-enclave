@@ -4,9 +4,8 @@
 
 //! Shared types and protocol definitions for NeuronEdge Enclave.
 //!
-//! This crate is Apache-2.0 and is consumed by both the NeuronEdge Enclave runtime
-//! (Apache-2.0) and the NeuronEdge Enclave control plane (BSL-1.1, separate repo).
-//! It must not depend on either side's internals (PRD §9.3, STANDARDS §8).
+//! This crate is Apache-2.0. It provides compatibility types for the runtime and
+//! optional external integrations. It must not depend on either side's internals.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]

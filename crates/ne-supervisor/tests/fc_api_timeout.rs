@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Audit O2: `api_request`/`api_put` must not hang forever against a wedged
+//! `api_request`/`api_put` must not hang forever against a wedged
 //! Firecracker API socket. Uses a fake `UnixListener` server that accepts
 //! the connection and then stalls, forcing the host's
 //! `tokio::time::timeout` to fire. Mirrors `tests/timeout_propagation.rs`'s

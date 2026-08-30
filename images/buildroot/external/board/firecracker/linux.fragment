@@ -13,7 +13,7 @@ CONFIG_VIRTIO_CONSOLE=y
 # virtio block (rootfs at /dev/vda)
 CONFIG_VIRTIO_BLK=y
 
-# virtio net (egress in Phase 1 once networking lands)
+# virtio net (egress when networking is enabled)
 CONFIG_VIRTIO_NET=y
 
 # vsock subsystem + virtio transport (host↔guest control channel)
