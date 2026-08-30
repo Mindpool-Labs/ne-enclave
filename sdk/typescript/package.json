@@ -4,7 +4,7 @@
   "description": "TypeScript SDK for the NeuronEdge Enclave Runtime API.",
   "license": "Apache-2.0",
   "author": "Mindpool, Inc. <dev@mindpool.io>",
-  "homepage": "https://neuronedge.ai",
+  "homepage": "https://github.com/Mindpool-Labs/ne-enclave",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Mindpool-Labs/ne-enclave.git"

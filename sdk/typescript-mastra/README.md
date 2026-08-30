@@ -1,8 +1,8 @@
 # @neuronedge/enclave-mastra
 
-A [Mastra](https://mastra.ai) adapter for the [NeuronEdge Enclave](https://neuronedge.ai) Runtime API. Gives an LLM agent a managed, confidential Firecracker microVM sandbox: run shell commands and move files in/out.
+A [Mastra](https://mastra.ai) adapter for the [NeuronEdge Enclave](https://github.com/Mindpool-Labs/ne-enclave) Runtime API. Gives an LLM agent a managed, confidential Firecracker microVM sandbox: run shell commands and move files in/out.
 
-> **Development mode.** The base `@neuronedge/enclave` SDK opens an insecure gRPC channel. Use this adapter against a local `nee` daemon until TLS + API-key client credentials ship.
+> **Local use only.** The base `@neuronedge/enclave` SDK opens an insecure gRPC channel. Use this adapter only with a local `nee` daemon.
 
 ## Install
 

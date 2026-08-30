@@ -19,27 +19,27 @@ unmaintained = "workspace"
 ignore = [
     # anyhow: UB requires Error::context followed by downcast_mut; the workspace
     # does not call downcast_mut. Upgrade to >=1.0.103 and remove this exception.
-    { id = "RUSTSEC-2026-0190", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=affected downcast_mut path is unused; upgrade anyhow to >=1.0.103 and remove exception" },
+    { id = "RUSTSEC-2026-0190", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=affected downcast_mut path is unused; upgrade anyhow to >=1.0.103 and remove exception" },
     # rustls-pemfile: unmaintained, transitive via rustls/axum-server/tonic.
     # Current wrapper delegates to maintained rustls-pki-types parsing.
-    { id = "RUSTSEC-2025-0134", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=unmaintained transitive wrapper delegates to rustls-pki-types; remove via dependency refresh" },
+    { id = "RUSTSEC-2025-0134", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=unmaintained transitive wrapper delegates to rustls-pki-types; remove via dependency refresh" },
     # libcrux SHAKE bug does not affect its ML-KEM use, which is the only path
     # reachable here through russh.
-    { id = "RUSTSEC-2026-0074", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=affected incremental SHAKE squeeze API is not used by libcrux ML-KEM; upgrade russh dependency tree" },
+    { id = "RUSTSEC-2026-0074", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=affected incremental SHAKE squeeze API is not used by libcrux ML-KEM; upgrade russh dependency tree" },
     # These libcrux-sha3 incremental/AVX2 SHAKE bugs explicitly do not affect
     # ML-KEM, which is the only use reachable here through russh.
-    { id = "RUSTSEC-2026-0207", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=affected incremental SHAKE squeeze API is not used by libcrux ML-KEM; upgrade russh dependency tree" },
-    { id = "RUSTSEC-2026-0208", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=affected AVX2 SHAKE output lengths do not occur in libcrux ML-KEM; upgrade russh dependency tree" },
+    { id = "RUSTSEC-2026-0207", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=affected incremental SHAKE squeeze API is not used by libcrux ML-KEM; upgrade russh dependency tree" },
+    { id = "RUSTSEC-2026-0208", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=affected AVX2 SHAKE output lengths do not occur in libcrux ML-KEM; upgrade russh dependency tree" },
     # libcrux-secrets is reachable through russh, but this bug is AArch64-only;
     # the supported and release targets are x86_64.
-    { id = "RUSTSEC-2026-0212", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=affected constant-time select implementation is AArch64-only while supported targets are x86_64; upgrade russh dependency tree" },
+    { id = "RUSTSEC-2026-0212", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=affected constant-time select implementation is AArch64-only while supported targets are x86_64; upgrade russh dependency tree" },
     # rsa is used for public-signature verification only; no runtime private RSA
     # operation is exposed to an attacker-observable timing channel.
-    { id = "RUSTSEC-2023-0071", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=runtime uses RSA verification only and holds no private RSA key; replace or upgrade rsa dependency" },
+    { id = "RUSTSEC-2023-0071", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=runtime uses RSA verification only and holds no private RSA key; replace or upgrade rsa dependency" },
     # russh 0.57 control traffic is bound to loopback and protected by the
     # per-sandbox NSSH1 preface; agent client/server APIs are not used.
-    { id = "RUSTSEC-2026-0153", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=confidential control channel is loopback-only with authenticated preface and no SSH-agent API; upgrade russh to >=0.60.3" },
-    { id = "RUSTSEC-2026-0154", reason = "owner=security@neuronedge.ai; expires=v0.2.1; rationale=confidential control channel is loopback-only with authenticated preface and no SSH-agent API; upgrade russh to >=0.60.3" },
+    { id = "RUSTSEC-2026-0153", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=confidential control channel is loopback-only with authenticated preface and no SSH-agent API; upgrade russh to >=0.60.3" },
+    { id = "RUSTSEC-2026-0154", reason = "owner=security@mindpool.io; expires=v0.2.1; rationale=confidential control channel is loopback-only with authenticated preface and no SSH-agent API; upgrade russh to >=0.60.3" },
 ]
 
 [licenses]

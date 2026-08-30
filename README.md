@@ -2,7 +2,7 @@
 
 **The open-source execution boundary for AI agents, with a Preview Azure confidential profile.**
 
-NeuronEdge Enclave joined Mindpool in July 2026. It remains a standalone, Apache-2.0 execution boundary for AI agents — see https://neuronedge.ai.
+NeuronEdge Enclave is an Apache-2.0 execution boundary for AI agents.
 
 Autonomous agents run code, install packages, call APIs, and touch sensitive data. NeuronEdge Enclave gives each agent a governed sandbox: an upstream Firecracker microVM with its own kernel in the supported standard profile, or an OpenShell sandbox directly inside an SEV-SNP CVM in the Preview Azure confidential profile.
 
@@ -43,7 +43,6 @@ A Rust runtime that creates, controls, snapshots, and destroys upstream-Firecrac
 | Azure vTPM SEV-SNP evidence primitive | Verified on DCasv5; product lane remains Preview |
 | Runtime package supply-chain enforcement in standard workspaces | Not implemented |
 | Confidential snapshot / restore / fork | Not implemented |
-| Intel TDX and per-microVM SNP | Planned |
 
 See the [capability ledger](docs/CAPABILITIES.md) for artifacts, verification
 paths, promotion rules, and limits.
@@ -171,7 +170,7 @@ NeuronEdge integrates two production-credible Apache-2.0 Rust projects:
 
 - **Standard tier:** per-workspace kernel isolation via Firecracker + jailer (chroot, cgroups, seccomp, namespaces). The host operator is trusted (no memory encryption).
 - **Confidential profile (Preview):** one workspace runs inside an Azure AMD SEV-SNP CVM. Evidence verification uses a two-layer binding: the boot-fixed AMD report anchors the vTPM attestation key, and a fresh TPM quote binds the caller nonce. The v0.2.0 product lane is not promoted to Supported until the exact signed release gate succeeds.
-- **Honest ceiling:** the confidential tier attests the *host CVM launch*, not the agent's guest code (guest-code measurement is a tracked follow-on). The isolation within the CVM is OpenShell's shared-kernel sandbox (Landlock/seccomp/netns), not a separate per-workspace hardware boundary (that's a future bare-metal tier). Per-workspace hardware isolation via nested microVMs is architecturally impossible on managed cloud (AMD SEV-SNP strips the virtualization extensions from the leaf guest).
+- **Honest ceiling:** the confidential tier attests the *host CVM launch*, not the agent's guest code. The isolation within the CVM is OpenShell's shared-kernel sandbox (Landlock/seccomp/netns), not a separate per-workspace hardware boundary. Per-workspace hardware isolation via nested microVMs is architecturally impossible on managed cloud (AMD SEV-SNP strips the virtualization extensions from the leaf guest).
 
 The full, as-built threat model — trust boundaries, attack trees, and an explicit residual-risk register — is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). It is written for a hostile reader and names every limitation honestly.
 
@@ -183,15 +182,6 @@ This branch prepares the evidence-backed v0.2.0 candidate. The standard profile
 is Supported. Azure confidential execution remains Preview until the signed
 candidate passes the required Azure artifact gate and the release is published
 without a rebuild.
-
-- Intel TDX confidential mode (needs DCesv5 silicon)
-- Per-workspace hardware attestation (bare-metal SEV-SNP, the v2 premium tier)
-- Snapshot/restore/fork for the confidential profile
-- mTLS for the runtime↔control-plane transport
-- Live AWS KMS backing
-- Runtime package supply-chain enforcement for standard workspaces
-
----
 
 ## Documentation
 
@@ -206,10 +196,6 @@ without a rebuild.
 
 - **Issues:** [github.com/Mindpool-Labs/ne-enclave/issues](https://github.com/Mindpool-Labs/ne-enclave/issues)
 - **Discussions:** [github.com/Mindpool-Labs/ne-enclave/discussions](https://github.com/Mindpool-Labs/ne-enclave/discussions)
-
-We are looking for **design partners** — regulated enterprises (finance, healthcare, government) evaluating confidential agent execution. If your CISO has blocked an agent deployment on isolation or attestation grounds, we'd like to talk: `dev@mindpool.io`.
-
----
 
 ## License
 

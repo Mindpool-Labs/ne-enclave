@@ -43,7 +43,7 @@ without a code citation is a bug in this document.
 **Invitation to challenge.** This is a living document. Security
 researchers are explicitly invited to challenge any claim in it. If you find an
 ✅ we cannot back with code, or a limitation we failed to disclose, that is exactly the
-report we want. See [SECURITY.md](../SECURITY.md) for the disclosure process, or send reports to **security@neuronedge.ai**. The coordinated-disclosure timeline
+report we want. See [SECURITY.md](../SECURITY.md) for the disclosure process, or send reports to **security@mindpool.io**. The coordinated-disclosure timeline
 is in §11.
 
 ---
@@ -446,7 +446,7 @@ The runtime follows the published CVE-response policy:
 - **Public advisory** at fix release, with affected versions and remediation.
 - **Subscriber notification** via the security mailing list.
 
-**Security contact.** Send reports to **security@neuronedge.ai** (see [SECURITY.md](../SECURITY.md) for the full policy).
+**Security contact.** Send reports to **security@mindpool.io** (see [SECURITY.md](../SECURITY.md) for the full policy).
 
 **Update commitment.** This threat model is published with the runtime and updated
 **per release**. Each release revises the status tags against the shipped commit; an upgrade
