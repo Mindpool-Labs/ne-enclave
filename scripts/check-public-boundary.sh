@@ -7,7 +7,7 @@
 
 set -u
 
-pattern='docs/(superpowers|aegisvm-artifacts)|(prd|arch|standards|spec|design)[[:space:]]*§|prd[[:space:]]*(fr|nfr)-[0-9]+|(^|[^[:alnum:]_])(per[[:space:]]+)?(fr|nfr)-[0-9]+(\.[0-9]+)?|(^|[^[:alnum:]])phase[-_[:space:]]*[0-9]+([^[:alnum:]]|$)|(^|[^[:alnum:]])p[0-9]([^[:alnum:]]|$)|(^|[^[:alnum:]_])spike([^[:alnum:]_]|$)|(^|[^[:alnum:]])bring[-_[:space:]]*ups?([^[:alnum:]]|$)|phase0[-_]spike|research[[:space:]]+note[[:space:]]*§|audit[[:space:]-]*finding[[:space:]-]*(id[[:space:]-]*)?#[[:space:]]*[0-9]+|audit[[:space:]-]*finding[[:space:]-]*(id[[:space:]-]*)?[a-z]+-?[0-9]+|audit[[:space:]]+[a-z][0-9]+(-[a-z]?[0-9]+)?|task[[:space:]-]*[0-9]+|risk[[:space:]]+[a-z]?[0-9]+|[(]r[12][)]|r[12]_single_cvm_direct\.rs|bsl-1\.1|separate[[:space:]]+(private[[:space:]]+)?control[-[:space:]]+plane[[:space:]]+(repository|repo)|typescript[[:space:]]+control[-[:space:]]+plane[[:space:]]+worker|(^|[^[:alnum:]])cp[[:space:]-]+repo([^[:alnum:]]|$)|vitest.*cross[-[:space:]]+repo|cross[-[:space:]]+repo.*vitest|(^|[^[:alnum:]_])wedge([^[:alnum:]_]|$)'
+pattern='docs/(superpowers|aegisvm-artifacts)|(prd|arch|standards|spec|design)[[:space:]]*§|prd[[:space:]]*(fr|nfr)-[0-9]+|(^|[^[:alnum:]_])(per[[:space:]]+)?(fr|nfr)-[0-9]+(\.[0-9]+)?|(^|[^[:alnum:]])phase[-_[:space:]]*[0-9]+([^[:alnum:]]|$)|(^|[^[:alnum:]])p[0-9]([^[:alnum:]]|$)|(^|[^[:alnum:]_])spike([^[:alnum:]_]|$)|(^|[^[:alnum:]])bring[-_[:space:]]*ups?([^[:alnum:]]|$)|phase0[-_]spike|research[[:space:]]+note[[:space:]]*§|audit[[:space:]-]*finding[[:space:]-]*(id[[:space:]-]*)?#[[:space:]]*[0-9]+|audit[[:space:]-]*finding[[:space:]-]*(id[[:space:]-]*)?[a-z]+-?[0-9]+|audit[[:space:]]+[a-z][0-9]+(-[a-z]?[0-9]+)?|task[[:space:]-]*[0-9]+|risk[[:space:]]+[a-z]?[0-9]+|[(]r[12][)]|r[12]_single_cvm_direct\.rs|bsl-1\.1|separate[[:space:]]+(private[[:space:]]+)?control[-[:space:]]+plane[[:space:]]+(repository|repo)|typescript[[:space:]]+control[-[:space:]]+plane[[:space:]]+worker|(^|[^[:alnum:]])cp[[:space:]-]+repo([^[:alnum:]]|$)|vitest.*cross[-[:space:]]+repo|cross[-[:space:]]+repo.*vitest|(^|[^[:alnum:]_])wedge([^[:alnum:]_]|$)|neuronedge\.ai|design[[:space:]-]+partners?|joined[[:space:]]+mindpool|premium[[:space:]-]+tier|/users/[^/]+/(development|desktop|documents|downloads)/|commercial/ne-control-plane'
 
 matches_pattern() {
     printf '%s\n' "$1" | grep -E -i "$pattern" >/dev/null
@@ -78,9 +78,17 @@ run_self_test() {
     expect_match 'implementation-specific worker disclosure' 'TypeScript control-plane Worker'
     expect_match 'private control-plane repository attribution' 'CP repo test coverage'
     expect_match 'cross-repository test attribution' 'cross-repo Vitest coverage'
+    expect_match 'product-site reference' 'https://neuronedge.ai'
+    expect_match 'product-domain email' 'security@neuronedge.ai'
+    expect_match 'partner-recruitment language' 'We are looking for design partners'
+    expect_match 'acquisition-history language' 'NeuronEdge joined Mindpool'
+    expect_match 'commercial tier language' 'the v2 premium tier'
+    expect_match 'author-local path' '/Users/example/Development/private-notes.md'
+    expect_match 'private control-plane path' 'Commercial/ne-control-plane/docs/PRD.md'
 
     # Negative corpus: public terminology and normal English must remain valid.
     expect_no_match 'public repository link' 'https://github.com/Mindpool-Labs/ne-enclave'
+    expect_no_match 'ordinary API path' '/api/v2/users/42'
     expect_no_match 'ordinary blocked-state word' 'the child process is wedged'
     expect_no_match 'ordinary hexadecimal token' 'p384 is a supported curve'
     expect_no_match 'public technical documentation' 'the runtime API is versioned'

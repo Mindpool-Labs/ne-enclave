@@ -10,7 +10,7 @@ issue and what to expect.
 
 Instead, please report it privately:
 
-- **Email:** security@neuronedge.ai (preferred)
+- **Email:** security@mindpool.io (preferred)
 - **GitHub:** use the
   [private vulnerability reporting](https://github.com/Mindpool-Labs/ne-enclave/security/advisories/new)
   feature on this repository.

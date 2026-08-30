@@ -30,7 +30,7 @@ rust-version = "1.88"
 license = "Apache-2.0"
 authors = ["Mindpool, Inc. <dev@mindpool.io>"]
 repository = "https://github.com/Mindpool-Labs/ne-enclave"
-homepage = "https://neuronedge.ai"
+homepage = "https://github.com/Mindpool-Labs/ne-enclave"
 
 [workspace.dependencies]
 # Async runtime.

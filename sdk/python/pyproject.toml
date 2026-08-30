@@ -47,7 +47,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://neuronedge.ai"
+Homepage = "https://github.com/Mindpool-Labs/ne-enclave"
 Repository = "https://github.com/Mindpool-Labs/ne-enclave"
 
 [tool.hatch.build.targets.wheel]
