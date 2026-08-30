@@ -5,7 +5,7 @@
 //! Report sources for the [`SevSnpProvider`].
 //!
 //! [`IoctlSnpReportSource`] is Linux + silicon (its body is a STUB filled in
-//! Task 9, host-gated); [`FakeSnpReportSource`] is for tests. The trait keeps
+//! host-gated); [`FakeSnpReportSource`] is for tests. The trait keeps
 //! the crate Mac-clippable: the ioctl impl is `cfg(target_os = "linux")`, so
 //! the rest of the crate compiles cleanly off-AMD-silicon and on macOS.
 
@@ -46,7 +46,7 @@ pub trait SnpReportSource: Send + Sync {
     fn get_report(&self, report_data: [u8; 64]) -> Result<SnpReport, AttestationError>;
 }
 
-/// AMD SEV-SNP firmware-rooted attestation provider (ARCH §884 Model A).
+/// AMD SEV-SNP firmware-rooted attestation provider.
 ///
 /// `generate` builds the canonical report data, hashes it with SHA-512 into the
 /// 64-byte `REPORT_DATA`, drives a [`SnpReportSource`] for the firmware report,
@@ -295,7 +295,7 @@ pub fn decode_exitinfo2(exitinfo2: u64) -> (u32, u32) {
 // ===========================================================================
 //
 // Azure DCasv5/ECasv5 SEV-SNP CVMs run behind an OpenHCL paravisor that does
-// NOT expose /dev/sev-guest (the Wedge-4 finding). At boot
+// NOT expose /dev/sev-guest. At boot
 // the paravisor fetches the genuine AMD SNP report and stores it in vTPM NVRAM
 // index 0x01400001 (the "HCLA" blob). On-silicon layout (parse authority:
 // kinvolk/azure-cvm-tooling az-cvm-vtpm/src/hcl/mod.rs, MIT):
@@ -322,13 +322,13 @@ pub fn decode_exitinfo2(exitinfo2: u64) -> (u32, u32) {
 //
 // The constants + pure helpers below are PURE (offset math + serde over a byte
 // slice) so they are Mac-testable; the `cfg(target_os = "linux")` shell-out
-// impl (`AzureVtpmReportSource`) lives in Task 2 and consumes them.
+// impl (`AzureVtpmReportSource`) consumes them.
 
 /// vTPM NVRAM index holding the HCLA report blob.
 ///
 /// This is the paravisor-written AMD SNP report. Pinned against Microsoft
 /// `cvm-guest-attestation.md` + the on-box `tpm2_getcap handles-nv-index`
-/// enumeration (research note §2).
+/// enumeration.
 pub const AZURE_HCLA_NV_INDEX: u32 = 0x0140_0001;
 
 /// Length of the HCL `AttestationHeader` that precedes the genuine `SNP_REPORT`
@@ -349,14 +349,14 @@ pub const AZURE_HCL_IGVM_OFF: usize = AZURE_HCLA_HEADER_LEN + crate::snp_report:
 pub const AZURE_HCL_VAR_DATA_OFF: usize = AZURE_HCL_IGVM_OFF + 20;
 
 /// `report_type == 2` in `IgvmRequestData` identifies an AMD SEV-SNP report
-/// (vs `4` for Intel TDX). Pinned against the on-box parse (research note §1).
+/// (vs `4` for Intel TDX). Confirmed against an on-box parse.
 pub const AZURE_HCL_REPORT_TYPE_SNP: u32 = 2;
 
 /// The persistent vTPM handle of the quoting Attestation Key (AK).
 ///
 /// On the default Azure confidential-vm image: RSA-2048,
 /// RSASSA-PKCS1v1.5-SHA256, attributes `restricted|sign`. Pinned against the
-/// on-box `tpm2_readpublic` (research note §5). `AzureVtpmReportSource::open`
+/// on-box `tpm2_readpublic`. `AzureVtpmReportSource::open`
 /// pre-flights this handle.
 pub const AZURE_DEFAULT_AK_HANDLE: u32 = 0x8100_0003;
 
@@ -636,7 +636,7 @@ impl SnpReportSource for IoctlSnpReportSource {
 // Linux + Azure-silicon: the OpenHCL paravisor vTPM report source + TPM Quote.
 // ===========================================================================
 //
-// Azure DCasv5/ECasv5 do NOT expose /dev/sev-guest (Wedge-4 finding). The
+// Azure DCasv5/ECasv5 do NOT expose /dev/sev-guest. The
 // OpenHCL paravisor fetches the AMD SNP report at boot and stores it (boot-
 // fixed, immutable) in vTPM NVRAM AZURE_HCLA_NV_INDEX. The guest reads it with
 // `tpm2_nvread`; the 1184-byte body IS the genuine AMD VCEK-signed report.
@@ -869,7 +869,7 @@ fn tempfile_path(prefix: &str) -> std::path::PathBuf {
 
 /// Run a `tpm2` subcommand; on non-zero exit / spawn failure, return a
 /// structured [`AttestationError::ReportFetchShellout`] carrying the program
-/// alias + trimmed stderr (the primary Azure bring-up diagnostic). Mirrors
+/// alias + trimmed stderr (the primary Azure evidence diagnostic). Mirrors
 /// `NetworkError::Command` (`network.rs:696`).
 #[cfg(target_os = "linux")]
 fn run_tpm2(binary: &std::path::Path, args: &[&str]) -> Result<Vec<u8>, AttestationError> {
@@ -965,9 +965,9 @@ mod tests {
 
     /// Round-trip: `SevSnpProvider::generate` produces evidence that `verify`
     /// accepts as `Verified` against a `SevSnp` anchor backed by the synthetic
-    /// VCEK chain. This is the load-bearing test for Task 6 — it exercises the
+    /// VCEK chain. This load-bearing test exercises the
     /// full canonical→SHA-512→firmware-report→VCEK-fetch→envelope path and
-    /// proves it composes with the Task 4/5 verifier.
+    /// proves it composes with the verifier.
     #[test]
     fn sev_snp_provider_generate_round_trips_to_verified() {
         let issued_at = 1_700_000_000i64;
@@ -1078,7 +1078,7 @@ mod tests {
     }
 
     /// A [`SnpReportSource`] that always fails — simulates the `/dev/sev-guest`
-    /// ioctl refusing the report. Used to pin the Task-6 contract the review
+    /// ioctl refusing the report. Used to pin the contract that review
     /// flagged as untested: a firmware-report fetch failure must surface as
     /// [`AttestationError::ReportFetch`] out of `SevSnpProvider::generate`
     /// (distinct from [`AttestationError::Sign`], which is reserved for the
@@ -1094,7 +1094,7 @@ mod tests {
     /// A firmware-report fetch failure surfaces as `ReportFetch` out of
     /// `SevSnpProvider::generate` — so the supervisor can distinguish a
     /// `/dev/sev-guest` failure (transport / silicon) from a cryptographic
-    /// signing failure. Locks the contract the Task-6 review flagged as
+    /// signing failure. Locks the contract that review flagged as
     /// untested: `generate` MUST NOT map a source error to `Sign` or swallow it.
     #[test]
     fn provider_propagates_report_fetch_failure_as_report_fetch() {
@@ -1138,7 +1138,7 @@ mod tests {
     // The HCLA NVRAM index constants, the report/var_data extraction, the AK
     // JWK decode, and the Layer-1 SHA256 binding are all pure offset/serde
     // math — Mac-testable without a vTPM. The `cfg(linux)` shell-out impl
-    // (Task 2) consumes these. Grounded in the on-silicon parse (research note).
+    // consumes these. Grounded in the on-silicon parse.
 
     /// The Azure HCLA constants are pinned against the on-box
     /// `tpm2_getcap handles-nv-index` enumeration + the parse.
@@ -1282,7 +1282,7 @@ mod tests {
     }
 
     /// The Layer-1 binding holds against the REAL on-box `var_data` → `REPORT_DATA`
-    /// (research note §3): `SHA256(var_data) == cb7f7fc2…e293`.
+    /// capture: `SHA256(var_data) == cb7f7fc2…e293`.
     #[test]
     fn sha256_matches_report_data_holds_for_real_on_box_values() {
         // The genuine REPORT_DATA[..32] captured on ne-snp-azure.
@@ -1294,7 +1294,7 @@ mod tests {
         // Reconstruct the exact var_data whose SHA256 is cb7f7fc2…e293. The on-box
         // var_data is a 1110-byte JWK; rather than embed it wholesale, this test
         // asserts the binding LOGIC by computing a fresh pair and confirming
-        // match/mismatch — the real-pair assertion lives in the e2e (Task 6).
+        // match/mismatch — the real-pair assertion lives in the e2e test.
         let fresh = b"test var_data";
         let fresh_digest = {
             use sha2::Digest;
@@ -1305,12 +1305,12 @@ mod tests {
         assert!(!sha256_matches_report_data(fresh, &report_data_first32));
     }
 
-    // ---- Azure vTPM report source: the shell-out error variant (spec §3.1) ----
+    // ---- Azure vTPM report source: the shell-out error variant -----------------
 
     /// A shell-out failure surfaces as `ReportFetchShellout` carrying the
-    /// program alias + stderr — the primary Azure bring-up diagnostic. Pure
+    /// program alias + stderr — the primary Azure evidence diagnostic. Pure
     /// construction (no process spawned); the `cfg(linux)` shell-out impl is
-    /// exercised on the `DCasv5` in Task 5.
+    /// exercised on the `DCasv5` in the integration test.
     #[test]
     fn report_fetch_shellout_carries_program_and_stderr() {
         let err = AttestationError::ReportFetchShellout {

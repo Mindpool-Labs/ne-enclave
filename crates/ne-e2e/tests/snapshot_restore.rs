@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge 6.8: KVM-gated snapshot/restore round-trip + pause/resume e2e.
+//! KVM-gated snapshot/restore round-trip + pause/resume e2e.
 //!
 //! **Headline test:** writes `/workspace/foo` (in guest tmpfs) → pauses ws-A →
 //! takes a Full snapshot → terminates ws-A → verifies the artifact → restores
@@ -254,7 +254,7 @@ async fn snapshot_restore_roundtrip() {
     terminate(inst_b, Duration::from_secs(5)).await.ok();
 }
 
-/// Documents the confirmed Firecracker limitation (wedge-6.8): after an
+/// Documents the confirmed Firecracker limitation: after an
 /// in-place pause→resume, host→guest vsock is dead (FC stops servicing
 /// CONNECTs), so the guest is unreachable. The public Pause/Resume API is
 /// deferred for this reason; snapshot/restore (fresh process) is the

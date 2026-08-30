@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 0 final milestone (PRD §14 deliverable 5):
+//! Baseline command-execution integration test:
 //! "Boot, run one command, destroy. Verify cleanup."
 //!
 //! Builds on `firecracker_lifecycle.rs` (boot + destroy + cleanup)
@@ -12,7 +12,7 @@
 //!
 //! Skipped by default — annotated `#[ignore]` because it requires:
 //!   - the Buildroot-produced vmlinux + rootfs at
-//!     `target/images/phase0-spike/images/{vmlinux,rootfs.ext2}`
+//!     `target/images/standard/images/{vmlinux,rootfs.ext2}`
 //!     (run `cargo run -p ne-image -- build` first);
 //!   - `/dev/kvm` + nested virt (only a KVM-capable host);
 //!   - `sudo -n` (NOPASSWD `sudo` for the `ne` service user — either broad
@@ -46,10 +46,10 @@ const JAILER: &str = "/opt/ne-enclave/bin/jailer";
 const CHROOT_BASE: &str = "/srv/jailer";
 
 #[tokio::test]
-#[ignore = "boots the spike image and round-trips a command via vsock; \
+#[ignore = "boots the test image and round-trips a command via vsock; \
            needs ne-image build + sudo NOPASSWD on a KVM-capable host"]
 async fn run_command_round_trips_through_vsock() {
-    let (kernel, rootfs) = locate_spike_artifacts();
+    let (kernel, rootfs) = locate_runtime_artifacts();
 
     let socket = format!("/tmp/ne-rc-{}.sock", std::process::id());
     let workspace_id = format!("wks-rc-{}", std::process::id());
@@ -82,7 +82,7 @@ async fn run_command_round_trips_through_vsock() {
 
     wait_for_socket(&socket, Duration::from_secs(5)).await;
 
-    // Boot the spike image.
+    // Boot the test image.
     let create = SupervisorRequest::CreateWorkspace(CreateWorkspaceRequest {
         workspace_id: workspace_id.clone(),
         kernel_sha256,
@@ -154,7 +154,7 @@ async fn run_command_round_trips_through_vsock() {
 #[ignore = "boots a real Firecracker microVM via jailer + relays RunCommand \
            through the supervisor's IPC; needs /opt/ne-enclave/* + sudo NOPASSWD"]
 async fn run_command_via_supervisor_ipc_round_trip() {
-    let (kernel, rootfs) = locate_spike_artifacts();
+    let (kernel, rootfs) = locate_runtime_artifacts();
 
     let socket = format!("/tmp/ne-rc2-{}.sock", std::process::id());
     let workspace_id = format!("wks-rc2-{}", std::process::id());
@@ -281,7 +281,7 @@ fn ne_binary() -> PathBuf {
     target_base.join("debug").join("nee")
 }
 
-fn locate_spike_artifacts() -> (PathBuf, PathBuf) {
+fn locate_runtime_artifacts() -> (PathBuf, PathBuf) {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let repo_root = PathBuf::from(manifest_dir)
         .parent()
@@ -289,7 +289,7 @@ fn locate_spike_artifacts() -> (PathBuf, PathBuf) {
         .parent()
         .unwrap()
         .to_path_buf();
-    let images = repo_root.join("target/images/phase0-spike/images");
+    let images = repo_root.join("target/images/standard/images");
     let kernel = images.join("vmlinux");
     let rootfs = images.join("rootfs.ext2");
     assert!(

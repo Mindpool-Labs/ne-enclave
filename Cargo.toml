@@ -1,7 +1,7 @@
 # NeuronEdge Enclave runtime — Cargo workspace.
 #
-# Apache-2.0 in perpetuity (PRD §9.1, STANDARDS §8). The BSL-1.1 control
-# plane lives in a separate repository and shares only `ne-protocol`.
+# Apache-2.0 in perpetuity. Optional external integrations share only
+# `ne-protocol` compatibility types with the runtime.
 
 [workspace]
 resolver = "3"
@@ -21,7 +21,7 @@ members = [
   "crates/ne-enclave-wasm",
   "bench",
 ]
-# Phase boundaries protected by RFC (ARCH §17.6 service inventory lock).
+# Phase boundaries are protected by RFC and a service-inventory lock.
 
 [workspace.package]
 version = "0.2.0"
@@ -37,7 +37,7 @@ homepage = "https://neuronedge.ai"
 tokio = { version = "1.43", features = ["full"] }
 tokio-vsock = "0.6"
 
-# HTTP client (control-plane key-release client in ne-seal; spec §6.2).
+# HTTP client (optional external key-release client in ne-seal).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # Serialization.
@@ -46,7 +46,7 @@ serde_json = "1"
 bytes = "1"
 
 # Errors. thiserror for library crates; anyhow only at binary entry points
-# (STANDARDS §2.1).
+# (workspace lint policy).
 thiserror = "1"
 anyhow = "1"
 
@@ -88,7 +88,7 @@ x509-cert = { version = "0.2", default-features = false, features = ["pem"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 # Pure-Rust RSA verify (RSASSA-PSS-SHA384) for the real AMD ARK/ASK, which are
 # RSA-4096. Verify-only: no `getrandom`/signing pulled into the verify path
-# (Mac-native + the wasm re-vendor in Task 2). `ring` stays banned.
+# (Mac-native + the wasm re-vendor). `ring` stays banned.
 rsa = { version = "0.9", default-features = false }
 
 # Sealed snapshots: AES-256-GCM + HKDF KEK + attestation-gated DEK release.
@@ -96,8 +96,8 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
-# WASM seam (`ne-enclave-wasm`) — the authoritative server-side attestation
-# gate + DEK wrap/unwrap, compiled for the BSL control-plane Worker.
+# Optional WASM compilation seam (`ne-enclave-wasm`) for external evaluation
+# tooling. It does not select or provide a production key-release backend.
 wasm-bindgen = "0.2"
 # getrandom `custom` backend: registered as a no-op/panic shim under wasm32 so
 # transitive getrandom (via ed25519-dalek/rand) compiles for the wasm target.
@@ -121,7 +121,7 @@ tempfile = "3"
 [workspace.lints.rust]
 # Forbid unsafe at the workspace floor. Individual crates that need unsafe
 # (e.g. the vsock guest agent) relax with #[allow(unsafe_code)] plus a
-# // SAFETY: comment per STANDARDS §2.1.
+# // SAFETY: comment required by workspace lint policy.
 unsafe_code = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
 missing_docs = "warn"
@@ -136,7 +136,7 @@ unused_must_use = "deny"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-# STANDARDS §2.1 — no unwrap/expect outside tests and startup; we surface
+# Workspace lint policy — no unwrap/expect outside tests and startup; we surface
 # these via lint and rely on test-only and `cfg(test)` overrides.
 unwrap_used = "warn"
 expect_used = "warn"

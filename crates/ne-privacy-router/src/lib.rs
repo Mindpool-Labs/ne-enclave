@@ -4,7 +4,7 @@
 
 //! NeuronEdge Enclave workspace-egress privacy router.
 //!
-//! Wedge-5 substrate. Wraps the NVIDIA OpenShell PII detection engine
+//! Privacy-router substrate. Wraps the NVIDIA OpenShell PII detection engine
 //! (consumed as a SHA-pinned git dep from our OpenShell fork) and
 //! exposes:
 //!
@@ -14,18 +14,18 @@
 //!   This keeps the fork bump a single-`Cargo.toml` change.
 //! - **A reusable HTTP reverse proxy** (`proxy` module) that scans
 //!   request bodies via the engine and forwards / redacts / blocks
-//!   per the active policy. The supervisor (Wedge 5.3) spawns one
+//!   per the active policy. The supervisor spawns one
 //!   instance per workspace inside the workspace netns.
 //! - **A YAML policy loader** (`policy_loader` module) for the binary.
 //!
-//! ## Scope of Wedge 5.2
+//! ## Current scope
 //!
-//! Phase 1 P0 first cut. HTTP/1.1 cleartext only — destinations are
+//! Current scope: HTTP/1.1 cleartext only — destinations are
 //! taken from the inbound `Host:` header, so the proxy sits behind an
-//! iptables DNAT (Wedge 5.3) without needing `SO_ORIGINAL_DST`
+//! iptables DNAT without needing `SO_ORIGINAL_DST`
 //! recovery. Tier-1 (regex) detection only; NER and HTTPS interception
-//! are deferred to later wedges. Request-direction scanning only;
-//! response-direction scanning is out of scope for P0.
+//! are deferred to later releases. Request-direction scanning only;
+//! response-direction scanning is outside the current cleartext scope.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used, clippy::panic))]

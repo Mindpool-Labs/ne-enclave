@@ -7,7 +7,7 @@
 //! Wraps the generated `RuntimeClient` with timed create, exec, and
 //! destroy operations, plus a readiness probe that retries a trivial
 //! exec until the guest agent answers — the same poll a real SDK
-//! client does (per Wedge 6.3).
+//! client does (per the client contract).
 
 use std::time::{Duration, Instant};
 

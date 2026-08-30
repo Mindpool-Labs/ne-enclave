@@ -15,7 +15,7 @@ artifact, a public API path, and independently checkable evidence.
 | Runtime package supply-chain enforcement (OSV/OPA/CVSS during standard workspace execution) | `standard` | Not implemented | None | None | OpenShell contains related functionality, but it is not wired into the standard runtime profile |
 | Confidential snapshot / restore / fork | `confidential-azure` | Not implemented | None | Profile contract rejects these operations | Firecracker vmstate is not applicable to the OpenShell execution backend |
 | Direct `/dev/sev-guest` product profile | None | Not implemented | None | Domain/provider code is synthetic-tested only | v0.2.0 product routing selects Azure vTPM explicitly; no public profile opens `/dev/sev-guest` |
-| Live AWS KMS key release | All | Not verified | None | Mock/synthetic coverage only | Do not represent sealed snapshots as live-KMS-backed or hardware-rooted |
+| External OpenBao Transit key release | All | Verified | Runtime mTLS key-release client and opaque Transit envelope | A local Docker integration stack exercised one key-release service, one PostgreSQL service, and one OpenBao development-mode service | This verifies only that local topology. HashiCorp Vault, cloud KMS, HSM, fleet operation, certificate enrollment and lifecycle, audit export, high availability, multi-region operation, and GA are not verified. |
 
 ## Promotion rule
 

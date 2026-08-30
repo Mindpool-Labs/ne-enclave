@@ -101,19 +101,19 @@ pub enum GuestResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandCompleted {
     /// Captured stdout as UTF-8, lossily converted (invalid bytes
-    /// become `U+FFFD`). Phase 0 returns the full buffer in one shot;
-    /// Phase 1 introduces streaming per PRD FR-4.5.
+    /// become `U+FFFD`). This response returns the full buffer in one shot;
+    /// a later API version can add streaming.
     pub stdout: String,
     /// Captured stderr; same conversion as `stdout`.
     pub stderr: String,
     /// Process exit code. `-1` if the process was terminated by a
-    /// signal and produced no code (we surface signal separately in
-    /// Phase 1).
+    /// signal and produced no code (the protocol surfaces the signal
+    /// separately).
     pub exit_code: i32,
     /// Wall-clock duration the command ran for.
     pub elapsed_ms: u64,
     /// True if stdout or stderr was truncated at the guest agent's per-stream
-    /// output cap (audit S3-F2). The captured bytes are still valid; only the
+    /// output cap. The captured bytes are still valid; only the
     /// tail was dropped. `#[serde(default)]` so a host running this build can
     /// still parse a response from a guest agent that predates the field
     /// (additive wire-compat; the guest image is upgraded independently).

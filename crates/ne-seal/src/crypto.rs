@@ -4,7 +4,7 @@
 
 //! Chunked streaming AES-256-GCM container for sealed `mem`/`vmstate` files.
 //!
-//! Layout (design §5.2):
+//! Layout:
 //! ```text
 //! magic        b"NESEAL01"   (8 bytes)
 //! chunk_size   u32 BE

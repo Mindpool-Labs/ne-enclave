@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge warm-pool: KVM-gated e2e for the one-tier warm pool.
+//! KVM-gated e2e for the one-tier warm pool.
 //!
 //! Asserts: a `create(tier)` HIT returns a ready, identity-distinct workspace
-//! far faster than cold-start P50 (1404 ms, wedge 6.4); the pool refills after
+//! far faster than cold-start P50 (1404 ms); the pool refills after
 //! checkout; members are reaped (no leaked FC procs) on `shutdown_pool`; and an
 //! empty pool falls back to a working synchronous fork.
 //!

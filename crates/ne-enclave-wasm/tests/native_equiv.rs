@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native (rlib) equivalence for the wasm seam. The wasm32 build is exercised
-//! end-to-end by the CP repo's vitest (cross-repo). HONEST: synthetic evidence only.
+//! Native-versus-WASM equivalence coverage for the WASM seam. This native test
+//! uses synthetic evidence only.
 //!
 //! Test-only relaxations: the workspace clippy config lints `unwrap()` even in
 //! tests, but STANDARDS permits it inside `#[cfg(test)]`. These allows are scoped
@@ -78,7 +78,7 @@ fn wrap_unwrap_roundtrip_matches_native() {
         )
         .expect("wrapped_dek decodes");
 
-    // wasm-unwrap path (nonce is host-supplied, spec §5.4):
+    // wasm-unwrap path (nonce is host-supplied):
     let unwrapped = unwrap_dek_json(
         &B64.encode(&blob),
         &B64.encode(*kek),

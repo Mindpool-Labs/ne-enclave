@@ -2,22 +2,22 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! NeuronEdge Enclave sealed snapshots (ARCH §952).
+//! NeuronEdge Enclave sealed snapshots.
 //!
 //! Encrypted snapshot artifacts whose data-encryption-key (DEK) release is
 //! gated runtime-locally on [`ne_attestation::verify`] passing against the
 //! snapshot's embedded attestation policy. A software-fallback KEK (HKDF of
 //! the host Ed25519 key) makes the path end-to-end-testable without silicon or
 //! the control plane; a `key_release::KeyRelease` contract defines the
-//! runtime↔control-plane key-release path (real CP KMS lands in the separate
-//! BSL repo).
+//! runtime↔control-plane key-release path. The HTTPS client is available when
+//! the `orchestration` feature is enabled.
 //!
 //! **Honest claim:** the software-fallback path is at-rest /
 //! confidentiality-vs-the-operator only — NOT a hardware-protection claim. The
 //! hardware-rooted claim (genuine SEV-SNP evidence) is unclaimed until the
 //! `SevSnp` policy path is exercised on real silicon and the real CP KMS lands.
 
-// STANDARDS §2.1 + workspace lint config: `unwrap_used`/`expect_used` are
+// Workspace lint config: `unwrap_used`/`expect_used` are
 // surfaced via lint and suppressed under `cfg(test)` (the test module is the
 // one place panicking on failure is idiomatic). This is the documented
 // "test-only and cfg(test) override" the workspace relies on.
@@ -77,7 +77,7 @@ pub enum SealError {
     /// AES-GCM authentication failed (wrap or content ciphertext tamper/truncation).
     #[error("ciphertext failed authentication")]
     CiphertextCorrupt,
-    /// The control-plane key-release path is not implemented in this wedge.
+    /// The selected key-release client is a placeholder.
     #[error("control-plane key release is not implemented")]
     NotImplemented,
     /// A `SevSnp` policy field could not be parsed (e.g. ARK DER, MEAS length).

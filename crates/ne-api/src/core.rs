@@ -426,7 +426,7 @@ impl RuntimeCore {
 
     /// Pause a running workspace.
     ///
-    /// DEFERRED (wedge-6.8): in-place pause/resume is unsupported on current
+    /// DEFERRED: in-place pause/resume is unsupported on current
     /// Firecracker (the guest vsock control channel does not survive an
     /// in-place resume). The supervisor returns `Unsupported`; this surfaces as
     /// a `CoreError`. Use snapshot/restore instead. Retained so the API
@@ -443,7 +443,7 @@ impl RuntimeCore {
 
     /// Resume a paused workspace.
     ///
-    /// DEFERRED (wedge-6.8): see [`Self::pause_workspace`]. The supervisor
+    /// DEFERRED: see [`Self::pause_workspace`]. The supervisor
     /// returns `Unsupported`; use snapshot/restore instead.
     pub async fn resume_workspace(&self, workspace_id: String) -> Result<String, CoreError> {
         let req = SupervisorRequest::ResumeWorkspace(ne_protocol::supervisor::WorkspaceRef {

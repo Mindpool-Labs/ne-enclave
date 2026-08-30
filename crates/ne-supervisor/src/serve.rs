@@ -54,7 +54,7 @@ fn probe_startup_requirements(
 
 /// Read total host RAM in MiB from `/proc/meminfo`'s `MemTotal` line
 /// (kB → MiB). Used to resolve `NE_MAX_WORKSPACES=0` /
-/// `NE_MAX_WORKSPACE_MEM_MIB=0` ("auto") at startup (audit O3).
+/// `NE_MAX_WORKSPACE_MEM_MIB=0` ("auto") at startup.
 ///
 /// Any failure — file missing, malformed line, non-Linux host — falls back
 /// to a conservative fixed default rather than panicking or blocking
@@ -95,7 +95,7 @@ pub struct SupervisorConfig {
     pub socket: PathBuf,
     /// Expected UID of the API daemon. Required in production.
     pub expected_peer_uid: Option<u32>,
-    /// Disable peer-credential authentication (STANDARDS §4.2).
+    /// Disable peer-credential authentication.
     pub dev_mode: bool,
     /// Absolute host path to the Firecracker binary.
     pub firecracker_binary: PathBuf,
@@ -118,7 +118,7 @@ pub struct SupervisorConfig {
     pub state_dir: PathBuf,
     /// Max concurrent workspaces (0 = derive from host RAM via
     /// [`crate::workspace::derive_max_workspaces`]). Soft ceiling — an
-    /// exhaustion backstop, not a hard quota (audit O3).
+    /// exhaustion backstop, not a hard quota.
     pub max_workspaces: usize,
     /// Max `mem_size_mib` any single workspace may request (0 = `min(host
     /// RAM, 32768)`). Resolved once from `/proc/meminfo` in [`serve`] (audit
@@ -164,14 +164,14 @@ pub struct SupervisorConfig {
 
 impl SupervisorConfig {
     /// Resolve the peer-auth mode, refusing to start in production mode
-    /// without an expected peer uid (STANDARDS §4.2).
+    /// without an expected peer uid.
     pub fn resolve_auth(&self) -> Result<PeerAuth> {
         match (self.dev_mode, self.expected_peer_uid) {
             (true, _) => Ok(PeerAuth::DevDisabled),
             (false, Some(uid)) => Ok(PeerAuth::RequireUid(uid)),
             (false, None) => anyhow::bail!(
                 "refusing to start: production mode requires --expected-peer-uid; pass \
-                 --dev-mode for local development (STANDARDS §4.2)"
+                 --dev-mode for local development"
             ),
         }
     }
@@ -302,7 +302,7 @@ pub async fn serve(cfg: SupervisorConfig) -> Result<()> {
         );
     }
 
-    // Admission control (audit O3): resolve NE_MAX_WORKSPACES /
+    // Admission control: resolve NE_MAX_WORKSPACES /
     // NE_MAX_WORKSPACE_MEM_MIB "0 = auto" against host RAM, read once here
     // rather than per-request. `derive_max_workspaces` and the mem default
     // both key off the same reading so they stay consistent with each other.

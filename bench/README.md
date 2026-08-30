@@ -103,7 +103,7 @@ results/<date>/
     teardown.csv
     boot_storm.csv
     density.csv
-  manifest.json          # ARCH §15 required-reporting block (see note below)
+  manifest.json          # required reporting block (see note below)
 ```
 
 ### manifest.json note
@@ -150,4 +150,4 @@ If reproducing on a cloud VM (Azure, AWS, GCP) with nested KVM, the numbers you
 measure are a **floor**, not a bare-metal ceiling. Nested virtualization adds VMM
 overhead that disappears on a bare-metal KVM host. Record your host SKU and the
 nested-virtualization caveat in `--environment-notes` and `--instance-sku` so the
-manifest is accurate. Nightly bare-metal benchmark numbers are a Phase 2 deliverable.
+manifest is accurate. Nightly bare-metal benchmark numbers require a future validation deliverable.

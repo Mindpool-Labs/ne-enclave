@@ -13,7 +13,7 @@ with a vTPM.
 |---|---|
 | OS | Ubuntu 24.04 (x86_64) |
 | Release verification | Cosign 3 on `PATH`; the bootstrap installer fails before installation without it |
-| Standard profile | `/dev/kvm` plus operator-installed Firecracker + jailer at `/opt/ne-enclave/bin/{firecracker,jailer}` |
+| Standard profile | `/dev/kvm` plus operator-installed upstream Firecracker + jailer at `/opt/ne-enclave/bin/{firecracker,jailer}` |
 | Azure confidential profile (Preview) | `/dev/tpmrm0`, `tpm2-tools`, no `/dev/kvm`; the signed release supplies the pinned OpenShell binary and policies |
 | Privileges | Root for install; the runtime itself drops to `nee` where possible |
 
@@ -214,8 +214,8 @@ Unprivileged service that exposes the gRPC and REST API.
 ## Execution profiles (`standard` + `confidential-azure`)
 
 NeuronEdge Enclave exposes one API with discoverable profile capabilities.
-`standard` is the supported default and uses Firecracker. `confidential-azure`
-is Preview and runs one OpenShell workspace inside an operator-provisioned
+`standard` is the supported default and uses upstream Firecracker. `confidential-azure`
+is Preview and runs one OpenShell workspace directly inside an operator-provisioned
 Azure SEV-SNP CVM. Inspect `GET /v1/runtime/capabilities`,
 `GetRuntimeCapabilities`, or `nee runtime capabilities`; unsupported
 operations fail explicitly.

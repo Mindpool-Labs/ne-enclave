@@ -11,10 +11,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
-# Enables the r1_single_cvm_direct e2e (the OpenShell sandbox surface in
+# Enables the single_cvm_direct e2e (the OpenShell sandbox surface in
 # ne-supervisor). Off by default so the standard e2e suite is unchanged; turned
 # on for the B round-trip on the DCasv5:
-#   cargo test -p ne-e2e --features confidential-cvm --test r1_single_cvm_direct \
+#   cargo test -p ne-e2e --features confidential-cvm --test single_cvm_direct \
 #     -- --ignored --nocapture
 [features]
 default = []

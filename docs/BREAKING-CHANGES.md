@@ -56,11 +56,11 @@ Rust callers are unaffected at the type level — both fields remain `u64` and o
 the serialized form changes. Everything that crosses the JSON boundary must be
 updated together:
 
-- Any non-Rust client that emits or parses a `SealingPolicy`, including the
-  TypeScript control-plane Worker's schema and its independent
-  `policy_canonical_bytes` port. A JS fix must carry the value as a string end
+- Any non-Rust client that emits or parses a `SealingPolicy`, including an
+  optional external-client schema and its independent `policy_canonical_bytes`
+  port. A JS fix must carry the value as a string end
   to end; `Number`-based coercion re-introduces the rounding this change removes,
-  and no test in either repo would go red.
+  and no current test would go red.
 - Any vendored `ne-enclave-wasm` artifact, which must be rebuilt — a stale
   prebuilt still demands numbers.
 - Any tooling that authors a policy file with `jq`, which represents JSON numbers

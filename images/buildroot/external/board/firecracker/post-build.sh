@@ -2,7 +2,7 @@
 # Buildroot post-build hook. Runs AFTER the rootfs tree is staged
 # under $TARGET_DIR but BEFORE it's packed into the ext4 image.
 #
-# Phase 0 spike scope:
+# Base image scope:
 #   - Layer in a tiny init that mounts /proc + /sys, starts the
 #     guest agent on vsock, then drops to a shell so the operator
 #     can probe interactively if needed.

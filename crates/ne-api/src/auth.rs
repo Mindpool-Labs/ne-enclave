@@ -10,7 +10,7 @@
 //! High entropy → SHA-256 is the correct at-rest form (no argon2 needed)
 //! and a `HashSet` membership test is safe: the lookup key is a
 //! preimage-resistant digest, not a low-entropy secret compared byte by
-//! byte. NFR-4.3.
+//! byte. The comparison uses fixed-length digests.
 
 #![forbid(unsafe_code)]
 

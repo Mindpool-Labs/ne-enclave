@@ -6,7 +6,7 @@
 //!
 //! Pre-forked [`firecracker::Instance`]s are held ready so `create(tier)` is a
 //! near-zero-latency handout instead of a cold boot. Members are produced by the
-//! supervisor's `boot_ready_reset` (the wedge-6.9 fork sequence); this module owns
+//! supervisor's `boot_ready_reset` fork sequence; this module owns
 //! only the pool state and refill arithmetic. The `WorkspaceManager` drives
 //! provisioning.
 

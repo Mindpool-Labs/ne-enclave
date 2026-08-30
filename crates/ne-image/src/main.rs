@@ -5,14 +5,14 @@
 //! `ne-image` — builds NeuronEdge Enclave guest kernel + rootfs images
 //! via Buildroot.
 //!
-//! Phase 1 P0 first iteration scope:
-//!   - One subcommand: `build --template phase0-spike`.
+//! Current scope:
+//!   - One subcommand: `build --template standard`.
 //!   - Invokes Buildroot with our `BR2_EXTERNAL` tree under
-//!     `images/buildroot/external/` and the `ne_phase0_spike_defconfig`.
+//!     `images/buildroot/external/` and the `ne_standard_defconfig`.
 //!   - Produces `vmlinux` + an ext4 rootfs in the configured output
 //!     directory.
 //!
-//! Not yet here (will land in subsequent Phase 1 iterations):
+//! Not yet here:
 //!   - Signing (cosign) and SBOM (SPDX) generation.
 //!   - arm64 cross-compile.
 //!   - Baking `ne-guest-agent` into the rootfs (the `BR2_EXTERNAL`
@@ -66,10 +66,10 @@ struct Cli {
 enum Cmd {
     /// Build a guest image from a named template.
     Build {
-        /// Template name. Currently only `phase0-spike` is shipped;
-        /// it maps to `configs/ne_phase0_spike_defconfig` in our
+        /// Template name. Currently only `standard` is shipped;
+        /// it maps to `configs/ne_standard_defconfig` in our
         /// `BR2_EXTERNAL` tree.
-        #[arg(long, default_value = "phase0-spike")]
+        #[arg(long, default_value = "standard")]
         template: String,
 
         /// Number of parallel `make` jobs (`-jN`). Defaults to the

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Seal/unseal orchestration: the full restore trust path (design §8).
+//! Seal/unseal orchestration: the full restore trust path.
 //!
 //! Unseal order: verify manifest (pinned) → verify seal (pinned to the SAME
 //! host key) → manifest↔seal binding → build gate params → fetch evidence →
@@ -222,7 +222,7 @@ async fn seal_one_file(
     Ok(())
 }
 
-/// Full unseal + restore trust path (design §8.2).
+/// Full unseal + restore trust path.
 ///
 /// `sw_release` serves the `SoftwareFallback` KEK path (local unwrap); `cp`
 /// serves the `ControlPlane` KEK path (CP-side release, attested by
@@ -230,7 +230,7 @@ async fn seal_one_file(
 /// Branches on `seal.dek_envelope.kek_provider`. Writes plaintext to
 /// `out_mem` / `out_vmstate`.
 ///
-/// HONEST (spec §7.2): the local attestation gate on the `ControlPlane` path is
+/// The local attestation gate on the `ControlPlane` path is
 /// **fail-fast defense-in-depth, NOT a security boundary** — a compromised host
 /// cannot be trusted to gate itself, so the authoritative gate runs server-side
 /// inside `cp.release_dek`. The local check merely avoids a network round-trip
@@ -289,7 +289,7 @@ pub async fn unseal_artifacts(
             sw.resolve_dek(&seal).await?
         }
         KekProvider::ControlPlane => {
-            // FAIL-FAST defense-in-depth (spec §7.2): a compromised host cannot
+            // FAIL-FAST defense-in-depth: a compromised host cannot
             // be trusted to gate itself, so this is NOT the security boundary.
             // It only avoids a round-trip when the host already knows its own
             // evidence fails; the authoritative gate runs server-side inside
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn gate_sev_snp_synthetic_open_and_deny() {
-        // HONEST: synthetic AMD-rooted material only (Wedge-1 ceiling). This
+        // HONEST: synthetic AMD-rooted material only. This
         // proves the gate's SevSnp arm opens on a chain-valid synthetic report
         // and closes on a reference-value (min_tcb) pin — NOT a real-silicon
         // or real-AMD-ARK claim.
@@ -622,7 +622,7 @@ mod tests {
     /// test's subsequent `seal_artifacts` re-encrypts (new DEK + nonces), so
     /// those recorded hashes no longer match the on-disk ciphertext.
     ///
-    /// This is HONEST about a wedge gap: `unseal_artifacts` does NOT re-verify
+    /// This is HONEST about a limitation: `unseal_artifacts` does NOT re-verify
     /// manifest artifact hashes against the ciphertext files (it verifies
     /// manifest-sig → seal-sig → seal↔manifest binding → gate → DEK → decrypt).
     /// The load-bearing binding is `seal.manifest_canonical_sha256 ↔
@@ -724,9 +724,9 @@ mod tests {
 
     /// In-process mock CP implementing BOTH `CpWrapClient` (seal-time wrap) and
     /// `ControlPlaneKeyRelease` (restore-time release). Mirrors what the real
-    /// SW backend (Task 9) does: wrap stores the DEK keyed by the returned blob
+    /// The software backend does: wrap stores the DEK keyed by the returned blob
     /// (transparent wrap — the blob IS the DEK); release looks up the stored DEK
-    /// by the seal's `wrapped_dek`. Reused by Task 4's unseal round-trip tests.
+    /// by the seal's `wrapped_dek`. Reused by unseal round-trip tests.
     ///
     /// `release_count` lets the fail-fast test prove the CP's `release_dek` is
     /// NEVER called when the local gate denies (defense-in-depth).
@@ -799,7 +799,7 @@ mod tests {
 
     /// Seal-time CP branch: when `kek_provider == ControlPlane`, `seal_artifacts`
     /// delegates the DEK wrap to the CP instead of the local HKDF path. Full
-    /// e2e seal→unseal lives in Task 4; this asserts the envelope reflects the
+    /// The end-to-end seal→unseal test asserts the envelope reflects the
     /// CP wrap result.
     #[tokio::test]
     async fn seal_cp_path_uses_cp_wrap() {
@@ -883,7 +883,7 @@ mod tests {
 
     /// Proves the `MockCp` double's wrap→release round-trip: the DEK handed to
     /// `CpWrapClient::wrap_dek` is recovered verbatim from
-    /// `ControlPlaneKeyRelease::release_dek`. This is the seam Task 4's unseal
+    /// `ControlPlaneKeyRelease::release_dek`. This is the seam that unseal
     /// round-trip builds on — a self-contained proof that the double, in
     /// isolation, faithfully returns what it stored.
     #[tokio::test]
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(*released, dek);
     }
 
-    // ---- Task 4: CP-branch unseal matrix ------------------------------------
+    // ---- Control-plane unseal matrix -----------------------------------------
 
     /// Evidence provider that stamps evidence `STALE_OFFSET` seconds in the past
     /// relative to the `now` the caller passes — forces the freshness gate to
@@ -956,7 +956,7 @@ mod tests {
 
     /// CP client that always denies release. Mirrors the real CP's authoritative
     /// 403 path: the runtime's local fail-fast gate PASSED, but the server-side
-    /// gate denies (the authoritative decision per spec §7.2).
+    /// gate denies (the authoritative decision).
     #[derive(Debug, Default)]
     struct DenyingMockCp;
 
@@ -1042,7 +1042,7 @@ mod tests {
 
     /// FAIL-FAST defense-in-depth: when the local gate denies (stale evidence),
     /// the CP's `release_dek` is NEVER invoked — fail-closed without the
-    /// round-trip. HONEST (spec §7.2): this local gate is NOT the security
+    /// round-trip. This local gate is NOT the security
     /// boundary; if the CP WERE called it would also deny. The point is early,
     /// cheap fail-closed.
     #[tokio::test]

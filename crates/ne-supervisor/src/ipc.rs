@@ -4,7 +4,7 @@
 
 //! Unix domain socket IPC server for the supervisor.
 //!
-//! Per ARCH §4.2 the supervisor's IPC surface is a unix domain socket
+//! The supervisor's IPC surface is a unix domain socket
 //! with peer-credential authentication. Wire format: newline-delimited
 //! JSON of [`SupervisorRequest`] / [`SupervisorResponse`].
 //!
@@ -12,7 +12,7 @@
 //!
 //! In production the supervisor runs as `root` and accepts only an
 //! [`ne-api`](crate) caller whose UID matches [`PeerAuth::RequireUid`].
-//! In `NE_DEV_MODE=1` per STANDARDS §4.2, [`PeerAuth::DevDisabled`]
+//! In `NE_DEV_MODE=1`, [`PeerAuth::DevDisabled`]
 //! turns the UID check off; the server still binds the socket but logs
 //! a warning on each connection.
 
@@ -56,7 +56,7 @@ pub struct IpcServer {
 
 impl IpcServer {
     /// Bind the socket at `path`. Any pre-existing file at `path` is
-    /// removed first; Phase 1 hardens this against TOCTOU. ENOENT on
+    /// removed first; a later revision hardens this against TOCTOU. ENOENT on
     /// removal is expected (and ignored).
     pub async fn bind(path: impl AsRef<Path>, auth: PeerAuth) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
@@ -66,7 +66,7 @@ impl IpcServer {
             Err(e) => return Err(e),
         }
         let listener = UnixListener::bind(&path)?;
-        // Socket permissions (audit S2-F3). The supervisor runs as root while
+        // Socket permissions. The supervisor runs as root while
         // the API daemon runs as the unprivileged `ne` user, so the socket
         // must be reachable across uids. SO_PEERCRED is the authentication gate;
         // the file mode is a coarse reachability control layered under the

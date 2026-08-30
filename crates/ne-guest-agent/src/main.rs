@@ -30,7 +30,7 @@ mod files;
 fn main() -> std::process::ExitCode {
     eprintln!(
         "ne-guest-agent is Linux-only; it runs inside the Firecracker guest. \
-         Cross-compile to x86_64-unknown-linux-musl for the spike image."
+         Cross-compile to x86_64-unknown-linux-musl for the minimal guest image."
     );
     std::process::ExitCode::from(1)
 }

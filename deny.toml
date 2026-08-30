@@ -62,7 +62,6 @@ allow = [
     "CC0-1.0",
     "0BSD",
     "Unlicense",
-    "MPL-2.0",
     # Permissive data license used by some transitive crates (e.g. unicode-icu data).
     "CDLA-Permissive-2.0",
 ]

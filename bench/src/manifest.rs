@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Run manifest: the ARCH §15 required-reporting block captured at run
+//! Run manifest: the required-reporting block captured at run
 //! start and committed alongside results so any reviewer sees the exact
 //! measurement environment.
 
@@ -25,9 +25,9 @@ pub struct Manifest {
     pub storage_backend: String,
     /// Snapshot restore strategy; `"n/a"` when no snapshots are exercised.
     pub snapshot_restore_strategy: String,
-    /// Confidential mode flag; false this wedge.
+    /// Confidential mode flag; false in this benchmark format.
     pub confidential_mode: bool,
-    /// CC platform; `"none"` this wedge.
+    /// CC platform; `"none"` in this benchmark format.
     pub cc_platform: String,
     /// The honesty caveat block (SKU + nested-virt floor framing).
     pub environment_notes: String,
@@ -55,7 +55,7 @@ pub struct Host {
 /// Component versions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Versions {
-    /// Firecracker version (with NeuronEdge Enclave patch level).
+    /// Upstream Firecracker version with source revision and build-hash provenance.
     pub firecracker: String,
     /// Jailer version.
     pub jailer: String,

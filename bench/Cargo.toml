@@ -1,6 +1,6 @@
 [package]
 name = "ne-bench"
-description = "Public reproducible benchmark harness for the NeuronEdge Enclave runtime (ARCH §15)."
+description = "Public reproducible benchmark harness for the NeuronEdge Enclave runtime."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

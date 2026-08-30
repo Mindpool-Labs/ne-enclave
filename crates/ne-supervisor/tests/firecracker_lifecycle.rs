@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 0 spike end-to-end: boot one Firecracker microVM through
+//! End-to-end coverage: boot one Firecracker microVM through
 //! the supervisor and tear it down, asserting host resource cleanup.
 //!
 //! Skipped by default — annotated `#[ignore]` because it:
@@ -30,7 +30,7 @@ use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::time::sleep;
 
-const KERNEL: &str = "/opt/ne-enclave/kernel/vmlinux-spike";
+const KERNEL: &str = "/opt/ne-enclave/kernel/vmlinux";
 const ROOTFS: &str = "/opt/ne-enclave/rootfs/ubuntu-24.04.squashfs";
 const FIRECRACKER: &str = "/opt/ne-enclave/bin/firecracker";
 const JAILER: &str = "/opt/ne-enclave/bin/jailer";

@@ -18,7 +18,7 @@ signature under the ARK is a purely public-key operation.
 | `amd-milan-ask.der` | Intermediate (ASK) | RSA-4096, signed by ARK (RSASSA-PSS-SHA384) | `SEV-Milan` | `ARK-Milan` |
 
 The VCEK leaf (P-384 ECDSA, signed by the ASK) is **not** baked here: it is
-unique per chip + TCB and fetched at runtime by the supervisor (Task 3).
+unique per chip + TCB and fetched at runtime by the supervisor.
 
 ## Provenance / SHA-256
 

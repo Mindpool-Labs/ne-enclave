@@ -44,7 +44,7 @@ fn dns_filter_binary() -> PathBuf {
     // explicit path (e.g. a release-profile build on the dev VM).
     // When not set, use the fused `nee` binary built by Cargo.
     // The supervisor injects the `dns-filter` subcommand token
-    // automatically (Task 4 / network.rs dns_filter_args).
+    // automatically (see `network.rs::dns_filter_args`).
     if let Ok(path) = std::env::var("NE_DNS_FILTER_BIN") {
         return PathBuf::from(path);
     }

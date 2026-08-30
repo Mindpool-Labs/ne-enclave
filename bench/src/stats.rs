@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(percentile(&xs, 90.0), Some(9.0));
         assert_eq!(percentile(&xs, 95.0), Some(10.0));
         assert_eq!(percentile(&xs, 99.0), Some(10.0));
-        // p0 clamps to rank 1 -> 1; p100 -> rank 10 -> 10.
+        // The zero percentile clamps to rank 1; the hundredth percentile clamps to rank 10.
         assert_eq!(percentile(&xs, 0.0), Some(1.0));
         assert_eq!(percentile(&xs, 100.0), Some(10.0));
     }

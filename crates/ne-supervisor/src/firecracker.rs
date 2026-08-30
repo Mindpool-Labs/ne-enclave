@@ -4,7 +4,7 @@
 
 //! Firecracker process supervisor — Linux-only.
 //!
-//! Per ARCH §4.4 each workspace gets its own Firecracker process,
+//! Each workspace gets its own Firecracker process,
 //! launched under `jailer` with a per-workspace chroot. The host
 //! supervisor (this code) coordinates lifecycle:
 //!
@@ -18,9 +18,9 @@
 //!    socket. Hand-rolled — we don't pull in hyper for five PUTs.
 //! 5. Track the `tokio::process::Child` until termination.
 //!
-//! Phase 0 scope: no network namespace, no nftables, no cgroup
-//! enforcement beyond what jailer applies. Phase 1 (PRD §14) adds
-//! networking; Phase 2 adds attestation.
+//! Current scope: no network namespace, no nftables, no cgroup
+//! enforcement beyond what jailer applies. Later releases add networking and
+//! attestation.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -212,7 +212,7 @@ pub enum LaunchError {
     #[error("jailer exited before Firecracker came up")]
     JailerExited,
     /// Either `api_socket_timeout` elapsed without the API socket
-    /// appearing, or (audit O2) an API request to an already-present
+    /// appearing, or an API request to an already-present
     /// socket did not complete within its deadline (`NE_FC_API_TIMEOUT_MS`,
     /// memory-scaled for snapshot/restore) — from the caller's POV both are
     /// "the Firecracker API is unreachable within budget."
@@ -266,7 +266,7 @@ struct JailedFirecracker {
 
 /// Spawns a jailed Firecracker, stages kernel+rootfs into the chroot, and
 /// waits for the API socket. Shared by `launch` (cold boot) and `restore`
-/// (snapshot load, Task 7). Returns the live child + resolved host paths.
+/// (snapshot load). Returns the live child + resolved host paths.
 async fn spawn_jailed_firecracker(
     cfg: &mut LaunchConfig,
 ) -> Result<JailedFirecracker, LaunchError> {
@@ -612,8 +612,8 @@ async fn vsock_request_response(
 /// [`ne_protocol::guest::GuestRequest::RunCommand`] as NDJSON,
 /// and returns the parsed [`ne_protocol::guest::GuestResponse`].
 ///
-/// Phase 1 P0 is unary — no streaming, no connection reuse. Streaming
-/// (FR-4.5) lands once the supervisor + guest agent grow chunked
+/// The current command API is unary — no streaming or connection reuse. Streaming
+/// can be added once the supervisor and guest agent grow chunked
 /// stdout/stderr framing.
 pub async fn run_command_via_vsock(
     uds: &Path,
@@ -869,7 +869,7 @@ async fn wait_for_socket(
         // the id-derived chroot), so a loser whose jailer already died at
         // mkdir/mknod would otherwise observe the WINNER's socket here,
         // believe it booted, and replay its config PUTs against the winner's
-        // live instance (audit C1 follow-through: cross-instance interference).
+        // live instance (to prevent cross-instance interference).
         //
         // Residual window (accepted): the child can die right after
         // try_wait() returns None and before the exists() check; the API
@@ -938,7 +938,7 @@ async fn api_request<T: Serialize + Sync>(
     };
     // A wedged Firecracker (hung syscall, deadlocked API thread) would
     // otherwise stall connect/write/read forever, hanging create/snapshot/
-    // restore indefinitely (audit O2). Reuses `ApiSocketTimeout` — from the
+    // restore indefinitely. Reuses `ApiSocketTimeout` — from the
     // caller's POV both "socket never appeared" and "socket appeared but
     // never answered" are the same failure: the API is unreachable within
     // budget.
@@ -1530,7 +1530,7 @@ mod tests {
 
     /// Regression test for the golden-image corruption bug: two concurrent
     /// managed-image stages racing on the SAME `dst` path (the exact shape of
-    /// the wedge-A `create_race` gauntlet, where two same-id creates derive
+    /// the `create_race` concurrency test, where two same-id creates derive
     /// the identical chroot path). Pre-fix, `stage_file` staged in place —
     /// `if dst.exists() { remove_file }` → `hard_link` → fallback `copy` —
     /// which has a TOCTOU window: both racers can observe `!dst.exists()`,
@@ -1538,7 +1538,7 @@ mod tests {
     /// falls to `copy(src, dst)`. Since `dst` is now a hardlink to `src`
     /// (the winner's link), `copy`'s truncate-on-open zeroes the shared
     /// inode — i.e. it destroys `src` too. This was observed for real as a
-    /// 0-byte `vmlinux` / "Unable to read elf header" during the Task 5
+    /// 0-byte `vmlinux` / "Unable to read elf header" during the image-staging
     /// KVM gauntlet.
     ///
     /// Managed staging retains independently verified source handles and
@@ -1696,7 +1696,7 @@ struct SnapshotLoadBody {
 pub struct RestoreLaunchConfig {
     /// Reuses the cold-boot [`LaunchConfig`] fields (binaries, `chroot_base`,
     /// jailer uid/gid, verified managed images, and timeouts). `network` MUST
-    /// be `None` for this wedge — networked restore is not supported (FC
+    /// be `None` for this implementation — networked restore is not supported (FC
     /// records the host TAP name in vmstate; restoring into a different
     /// `workspace_id` would reference a non-existent TAP).
     /// `workspace_id` is the NEW id (ws-B, the restored workspace).
@@ -1805,7 +1805,7 @@ pub async fn restore(mut cfg: RestoreLaunchConfig) -> Result<Instance, LaunchErr
                 jailer_gid: cfg.launch.jailer_gid,
                 lifecycle_state: ne_protocol::supervisor::WorkspaceState::Running,
                 // Networked restore is rejected above; restored VMs are always
-                // non-networked in this wedge.
+                // non-networked in this implementation.
                 network_slot: None,
                 // Snapshot manifest metadata — captured from the restore config.
                 guest_vsock_cid: cfg.launch.guest_vsock_cid,

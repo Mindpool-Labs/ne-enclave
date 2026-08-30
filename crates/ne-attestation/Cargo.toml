@@ -37,7 +37,7 @@ x509-cert = { workspace = true }
 # In `rsa` 0.9 the `pss` module and `pkcs1` dep are non-optional (always on);
 # the only optional feature we enable is `sha2` (the SHA-384 digest). Verify-
 # only: rsa's `getrandom` feature stays OFF, so no `getrandom` is pulled into
-# the verify path (Mac-native + the wasm re-vendor in Task 2). `ring` stays
+# the verify path (Mac-native + the wasm re-vendor). `ring` stays
 # banned.
 rsa = { workspace = true, features = ["sha2"] }
 ureq = { workspace = true, optional = true }

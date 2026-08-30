@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Infrastacks LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wedge: the snapshot memory dump must NOT head-of-line-block the supervisor
-//! (audit C2). KVM-gated.
+//! The snapshot memory dump must NOT head-of-line-block the supervisor
+//! and is KVM-gated.
 //!
 //! Proves: while a large-memory `snapshot()` is mid-dump (multi-GiB, seconds),
 //! a concurrent supervisor op that only needs the global `instances` mutex
@@ -266,7 +266,7 @@ async fn snapshot_does_not_head_of_line_block() {
 
 /// A `terminate` that races an in-flight snapshot must NOT be undone by the
 /// snapshot's finalize step: once the workspace is removed, `snapshot()` must
-/// never reinsert it (the wedge-7.1 resurrection guard). The on-disk artifact
+/// never reinsert it (the resurrection guard). The on-disk artifact
 /// may still complete, but the workspace stays gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires /dev/kvm + firecracker"]

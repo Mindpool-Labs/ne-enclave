@@ -1,8 +1,8 @@
 # NeuronEdge Enclave — Public Threat Model
 
 **Status:** As-built security audit complete for the v0.2.0 candidate. The standard profile is Supported. The `confidential-azure` profile is Preview until the exact signed candidate passes the required KVM and Azure artifact gates without a rebuild.
-**Date:** July 2026
-**Scope:** The Apache-2.0 NeuronEdge Enclave **runtime** as built for the v0.2.0 candidate. The **control-plane key-release Worker** (`control-plane/`) is a separate surface referenced where it bears on the runtime's sealed-snapshot path; its authoritative gate + anti-replay are synthetic-tested, with live AWS KMS + real-silicon key release unclaimed.
+**Date:** 2026-08-30
+**Scope:** The Apache-2.0 NeuronEdge Enclave **runtime** as built for the v0.2.0 candidate. Its external key-release client is verified only against a local development integration topology; this is not a production-topology or GA claim.
 **Canonical:** This document is the canonical, as-built threat model. The architecture doc is design intent; this is ground truth.
 
 ---
@@ -17,7 +17,7 @@ this.
 
 It is written for a hostile reader: a security researcher who will diff every claim here
 against the source under `crates/`, and who rewards disclosed limits
-and punishes concealment. We share that incentive. NeuronEdge Enclave's wedge is an enforced execution
+and punishes concealment. We share that incentive. NeuronEdge Enclave's core value is an enforced execution
 boundary with independently verifiable audit and attestation artifacts. The standard profile
 uses software-rooted evidence and trusts the host operator. The Preview Azure profile exposes
 hardware-rooted evidence for the outer CVM, but does not attest guest code or create a
@@ -83,7 +83,7 @@ snapshot/restore/fork, and does not claim guest-code measurement,
 per-workspace hardware isolation, or hardware-rooted key release. No public
 v0.2.0 product profile selects the direct `/dev/sev-guest` provider.
 
-Sealed snapshots ship runtime-side and the CP-mediated key-release service is synthetic-tested (live AWS KMS + real-silicon key release unclaimed — see §4), but neither advances the hardware-rooted key-release claim. **Managed image enforcement is shipped**: cold create accepts only lowercase kernel/rootfs SHA-256 digests, resolves their fixed locations beneath the supervisor-owned image store, hashes retained no-follow file handles, and copies verified bytes into independent per-workspace files before launch (`crates/ne-supervisor/src/image.rs`, `crates/ne-supervisor/src/workspace.rs`). Restore and fork use the same resolver for the digest pair signed into the manifest. This prevents callers from supplying arbitrary host paths and prevents writable rootfs aliasing between the store or workspaces. It does not defend against a hostile host root, which remains trusted. **Paused-VM snapshot/restore
+Sealed snapshots ship runtime-side. The external key-release client uses native mTLS and binds the attested snapshot digest as associated data. A local Docker integration topology verified wrap and release through one key-release service, one PostgreSQL service for atomic nonce claims, and one OpenBao development-mode Transit service that retains the external KEK. If a dependency outage happens after a nonce claim, the original sealed snapshot requires fresh evidence before retry. This is not a production-topology, HA, certificate-lifecycle, audit-export, or hardware-rooted key-release claim. **Managed image enforcement is shipped**: cold create accepts only lowercase kernel/rootfs SHA-256 digests, resolves their fixed locations beneath the supervisor-owned image store, hashes retained no-follow file handles, and copies verified bytes into independent per-workspace files before launch (`crates/ne-supervisor/src/image.rs`, `crates/ne-supervisor/src/workspace.rs`). Restore and fork use the same resolver for the digest pair signed into the manifest. This prevents callers from supplying arbitrary host paths and prevents writable rootfs aliasing between the store or workspaces. It does not defend against a hostile host root, which remains trusted. **Paused-VM snapshot/restore
 with a signed version-5 manifest is shipped**: a read-only-rootfs PAUSED microVM can be snapshotted
 into a reusable artifact (`crates/ne-supervisor/src/firecracker.rs` `snapshot_create`,
 `crates/ne-supervisor/src/workspace.rs` `WorkspaceManager::snapshot`); the artifact's
@@ -126,15 +126,12 @@ What the runtime is trying to protect, as it exists today.
 >   shipped; the **runtime-side sealed format** (AES-256-GCM + signed `seal.json`
 >   envelope + runtime-local attestation gate + software-fallback KEK) is shipped
 >   but is **at-rest / confidentiality-vs-the-operator only** (software-fallback KEK), NOT
->   hardware-protected. The **CP-mediated key-release service** is synthetic-tested
->   end-to-end (`control-plane/worker/`, `SoftwareKmsBackend` real + `AwsKmsBackend`
->   implemented); the **hardware-rooted claim**
->   (SEV-SNP-gated key release on real silicon) and **live AWS KMS** remain unclaimed — see
->   §4 sealed-snapshots block for the honest ceiling.
-> - **KEKs in the control-plane KMS** — the confidential-mode key-management surface lives in
->   the control-plane Worker (`control-plane/worker/`), NOT this runtime. `SoftwareKmsBackend` is exercised in tests
->   with a synthetic KEK; `AwsKmsBackend` is implemented but mock-fetch-tested only — never
->   exercised against a live AWS KMS account.
+>   hardware-protected. The external key-release client is verified only in a
+>   local Docker integration topology and does not make a hardware-rooted or
+>   GA claim.
+> - **KEKs in an external key-management system** — the verified local
+>   integration keeps the KEK in OpenBao Transit. Vault, cloud KMS, and HSM
+>   backends are not verified.
 
 ---
 
@@ -164,9 +161,9 @@ to exclude the cloud host operator, while guest root inside that CVM remains tru
 **Partially trusted.** The guest agent — used for convenience and liveness, but the host
 **must assume it can lie or be compromised**; the host enforces policy, never the guest.
 Rootfs package content (signed at build, but carries upstream packages). External control
-plane metadata — ⏳ context: today's localhost/dev-mode runtime has no control
-plane, so there is no such metadata to validate yet; once a control plane exists it is
-validated against a versioned protocol and not blindly trusted.
+plane metadata is partially trusted and validated through the versioned
+key-release contract in the tested local topology. Fleet enrollment and
+certificate lifecycle are not implemented or verified.
 
 **Azure confidential product profile — ◐ Preview.** The product routing,
 single-workspace capacity limit, OpenShell execution backend, Azure vTPM
@@ -202,22 +199,25 @@ Specifically:
 - **Paravisor-in-TCB.** Azure relays the report through the OpenHCL paravisor, so the paravisor is inside the measured, attested set. This is honestly *larger* than a bare-metal/GCP report (no paravisor) but is **not weaker on report authenticity** — the VCEK→ARK signature chain is identical and the report is the genuine AMD artifact.
 - The report's `REPORT_DATA` is **boot-fixed** (the AK fingerprint), NOT a caller nonce. The per-request binding is via the TPM Quote (Layer 2), not the report's own `REPORT_DATA` field. The claim must not conflate the two.
 - It is **not** per-microVM attestation. The confidential tier is **single-CVM-direct (B)** — the agent + OpenShell run directly inside the host CVM; there is no nested microVM. Workspace identity binds to *host-CVM* evidence. **Per-workspace hardware isolation (true per-microVM SNP) is deferred to a future bare-metal tier.**
-- It is **not KMS-hardware-bound.** The DEK is wrapped under the CP's `SoftwareKms` KEK (a Worker secret). The hardware-rooted gate is over *evidence*, not over the KEK's key material.
+- It is **not KMS-hardware-bound.** The runtime software fallback uses host-held key material. External evaluation coverage does not validate a production hardware-rooted key-release path.
 - It is **not** guest-code measurement. The report's `MEASUREMENT` is the host-CVM/paravisor launch digest, not NeuronEdge runtime or workspace code.
 - **Nesting is architecturally impossible on managed cloud.** Nesting a Firecracker microVM inside a SEV-SNP CVM is impossible — AMD SEV-SNP strips the virtualization extensions from the leaf guest, and VMPLs are not an escape hatch. Verified: [Azure CVM FAQ](https://learn.microsoft.com/en-us/azure/confidential-computing/confidential-vm-faq), [AMDESE/AMDSEV #169](https://github.com/AMDESE/AMDSEV/issues/169). The `confidential-azure` profile therefore runs OpenShell directly inside the outer CVM and does not install or invoke Firecracker. Per-microVM `KVM_SEV_SNP_*` launch is retained only for a future bare-metal profile.
 - **The confidential tier's isolation is shared-kernel, in-process.** On the confidential tier, OpenShell isolates the agent with Landlock/seccomp/network-namespaces/privilege-drop — strong, but **not a separate hardware-virtualized kernel**. The CVM boundary is the outer wall (operator-excluded, attested); OpenShell is defense-in-depth within it. A supervisor exploit yields the CVM guest's root, not a contained VM — the blast radius is bounded by the CVM. **One CVM per sensitive workspace** is mandated; multi-tenant-in-one-CVM is rejected (process-level isolation between workspaces in one CVM is too weak for the isolation guarantee).
-- TDX, mTLS, strong-global replay (beyond per-quote freshness), cross-host transfer, and the control-plane attestation policy engine remain **⏳ Planned**.
+- TDX, cross-host transfer, fleet enrollment, certificate lifecycle, and the
+  control-plane attestation policy engine remain **⏳ Planned**. The external
+  key-release path has locally verified mTLS and PostgreSQL nonce claims; that
+  proof does not establish fleet-wide replay protection.
 
 The `/dev/sev-guest` `Proof::SevSnp` path (GCP/bare-metal) remains synthetic-tested and silicon-unvalidated on those clouds; only the Azure `Proof::SevSnpAzure` path is silicon-verified.
 
 **Sealed snapshots (runtime side) — ◐ Partial / CP- and silicon-gated.** The `ne-seal` crate ships the runtime side of sealed snapshots: an AES-256-GCM chunked-streaming content container, a separate signed `seal.json` envelope (`SealEnvelope`, domain-tagged `ne-enclave-seal-v1`) carrying a `SealingPolicy` + wrapped DEK + a `manifest_canonical_sha256` that binds the seal to its companion `SnapshotManifest` (a seal↔manifest swap fails `BindingMismatch`), and a **runtime-local** attestation gate (`ne_attestation::verify` against the embedded policy) that must pass before the DEK is released. The path is **synthetic-unit-tested** end-to-end, including policy-mismatch denial and binding-mismatch rejection. Honest caveats:
 
-- The shipped KEK is a **software fallback** (HKDF of the host Ed25519 key). The runtime↔CP `KeyRelease` contract is realized by the control-plane Worker (`control-plane/worker/`): `/v1/seal/wrap-dek` + `/v1/seal/release-dek`, with an **authoritative** server-side gate that reuses the audited Rust `verify_against_policy` via the `ne-enclave-wasm` seam (NOT the runtime's UX-only fail-fast gate), a Workers-KV nonce-cache for anti-replay, and API-key auth. `SoftwareKmsBackend` (real AES-256-GCM) is the tested backend; `AwsKmsBackend` (SigV4) is implemented. The path is **synthetic-Software-evidence-tested end-to-end**. **Still unclaimed:** live AWS KMS (mock-fetch-tested only), Vault BYO-KMS, and HSM backing.
+- The shipped local KEK is a **software fallback** (HKDF of the host Ed25519 key). Separately, the runtime-to-external `KeyRelease` contract is verified with native mTLS, PostgreSQL nonce claims, and OpenBao Transit KEK custody in one local Docker topology. **Still unverified:** HashiCorp Vault, cloud KMS, HSM backing, fleet enrollment, certificate lifecycle, audit export, HA, multi-region operation, and production deployment validation.
 - The software-fallback path is **at-rest / confidentiality-vs-the-operator only — NOT hardware-protected.** An insider host operator who holds the runtime Ed25519 key material can derive the KEK and decrypt the artifact; the gate enforces *policy match*, not operator exclusion. It closes "plaintext snapshot at rest," not "operator can read the snapshot."
-- The **hardware-rooted claim** — genuine SEV-SNP evidence gating key release — is **unclaimed** until the `SevSnp` policy path is exercised on real silicon AND a live AWS KMS backend is exercised against a real account. The CP-mediated key-release contract lands the *contract* (authoritative server-side gate + synthetic-tested Software path), but does NOT advance the silicon or live-KMS claims. The synthetic SevSnp gate test **inherits the same ceiling** as the §4 SEV-SNP block: no live system produces or consumes a real SNP report, and no AMD SEV-SNP hardware has been provisioned for the key-release path.
+- The **hardware-rooted claim** — genuine SEV-SNP evidence gating production key release — is **unclaimed**. The local external-path proof does not validate a production deployment or silicon-rooted KMS claim.
 - Sealed snapshots are wired into the supervisor snapshot path **Linux-gated**; they apply only where the existing snapshot path applies (non-networked workspaces today, §9).
 
-Do not represent sealed snapshots as hardware-protected confidentiality today. The shipped artifact is a synthetic-tested runtime-side format + a runtime-local attestation gate over a software-fallback KEK, plus a synthetic-tested CP-mediated authoritative gate; the hardware-rooted claim is pending real silicon AND a live AWS KMS backend.
+Do not represent sealed snapshots as hardware-protected confidentiality today. The shipped artifact is a runtime-side format plus a runtime-local attestation gate over a software-fallback KEK. The external Transit path is verified only in its tested local topology.
 
 **Untrusted.** Agent-generated code, package installs inside the workspace, shell commands,
 files written by the agent, network destinations the guest requests, guest root after
@@ -305,7 +305,7 @@ Shipped mitigations:
 Not yet shipped:
 - Copy-on-write shared backend (UFFD) on fork — each fork currently copies the full memory
   image; shared CoW is deferred (§9).
-- Sealed-snapshot key release gated on attestation — the **authoritative** server-side gate + anti-replay landed in the control-plane Worker (synthetic-tested); the runtime's local gate remains UX/latency-only. Live AWS KMS + real-silicon key release are still planned.
+- Production-topology sealed-snapshot key release, fleet enrollment, certificate lifecycle, audit export, and HA. The external path is verified only in its tested local topology; the runtime's local gate remains UX/latency-only.
 - Tenant-scoped access policy on the snapshot/fork API — no multi-tenant control-plane in
   this runtime; the supervisor host key is the only signing authority.
 
@@ -318,14 +318,13 @@ does not measure the workspace code, and is not a hardware-rooted key-release
 claim. The product lane remains Preview until the exact signed artifact gate
 passes.
 
-**T4 — Replay attack on key release. ◐ Partial (CP-side); ⏳ runtime-side.**
-This document is scoped to the Apache-2.0 **runtime**; the runtime itself performs no
-attestation-gated key release (its local gate is UX/latency-only). The **authoritative**
-gate + anti-replay now live in the control-plane Worker (`control-plane/worker/`):
-a Workers-KV nonce-cache (`checkAndReserve`) rejects a reused release nonce with 403
-`nonce_replay`. That mitigation is synthetic-tested only;
-the freshness-window and nonce-binding design intent is realized for the Software path, with live-AWS + silicon still
-unclaimed.
+**T4 — Replay attack on key release. ◐ Partial (external path); ⏳ runtime-side.**
+This document is scoped to the Apache-2.0 **runtime**; its local gate remains
+UX/latency-only. The external path is locally verified with native mTLS and
+atomic PostgreSQL nonce claims. A dependency outage after a claim requires
+fresh evidence before the original sealed snapshot can retry. This does not
+verify fleet-wide replay protection, certificate lifecycle, HA, or a production
+deployment.
 
 **T5 — Audit chain tampering. ◐ Partial.**
 Leaves (a) and (b) are ✅; the chain is **tamper-evident locally only** — there is no
@@ -410,9 +409,9 @@ it.
 | **Warm-pool residual risks** | (a) **Inherited base-snapshot state:** pooled members inherit all captured base-snapshot state — in-memory contents and `/workspace` at capture time. Identity reset re-randomizes only hostname/machine-id/RNG; it does not scrub memory. Usage contract: pool from a *warm-but-idle* base (no sensitive data loaded at snapshot time). (b) **Provisional hostname:** a member's guest hostname is its pool id (`pool-{tier}-{ulid}`), not the caller's `workspace_id`. This is cosmetic — machine-id distinctness and RNG divergence hold; the cold path does not guarantee `hostname == workspace_id` either. (c) **Per-member full memory copy:** each pooled member copies the full memory image into its jailer chroot; shared-backend / UFFD copy-on-write is deferred. (d) **Non-networked members only:** snapshot/restore bakes the host TAP device into vmstate, so pooled members carry no network device. `Create(tier)` with network config is rejected (`InvalidRequest`) — the pool is not silently bypassed. | (c) Planned: UFFD CoW shared backend. All others: operational or accepted. |
 | **Live-state snapshot residual risks** | (a) **Brief freeze gap during the swap:** the source is paused for the duration of capture plus the fresh-restore boot and guest-ready wait. While paused, the source id resolves to the frozen old instance and a command against it does not make progress; the registry swap to the fresh, already-ready instance happens only after `wait_for_guest_ready` succeeds, so callers never reach a half-booted VM. After the swap the source resolves to the new `Running` instance under a new PID. The interruption is bounded by capture + warm-restore latency; clients requiring zero interruption should use a fork instead. (b) **Source acquires a new Firecracker PID:** the post-swap pid is surfaced as `SnapshotInfo.firecracker_pid`; anything that keyed off the original PID (e.g., external process monitors, cgroup paths scoped to the old pid) must re-resolve. (c) **Transient shared guest CID:** during the brief window between the fresh FC process starting and the frozen old process being reaped, both share the inherited guest CID. This is safe — host↔guest isolation is per-chroot UDS, not CID; the old process is frozen and immediately reaped; the window is bounded and accepted. (d) **Inherited snapshot state-capture caveats:** live snapshot captures in-memory data and `/workspace` contents at the snapshot point; the source diverges from the artifact afterward. In-memory secrets and `/workspace` contents present at capture time are preserved in the artifact — the same usage contract as non-live snapshot/fork (snapshot-a-warm-idle-base). | (a)(b) Operational / accepted. (c) Accepted (per-chroot UDS isolation proven). (d) Future: sealed snapshots. |
 | **Snapshot: non-networked workspaces only** | Snapshot/restore is supported only for `network: None` workspaces. Firecracker bakes the host TAP device name into vmstate, so restoring a networked workspace into a different workspace ID would reference a non-existent TAP. `WorkspaceManager::snapshot` rejects a networked source workspace (`crates/ne-supervisor/src/workspace.rs`); `firecracker::restore` rejects a networked restore config (`LaunchError::NetworkedRestoreUnsupported`, `crates/ne-supervisor/src/firecracker.rs`). Networked snapshot with TAP host-device remapping is deferred. | Future: networked snapshot (TAP remap). |
-| **Snapshot artifacts are plaintext at rest — PARTIALLY RESOLVED** | **Runtime-side sealed format shipped:** the `ne-seal` crate provides AES-256-GCM chunked-streaming content encryption + a signed `seal.json` envelope (`ne-enclave-seal-v1`, manifest↔seal canonical-hash binding) + a runtime-local attestation gate (`ne_attestation::verify` against the embedded `SealingPolicy`) that must pass before the DEK is released. **Honest ceiling:** the shipped KEK is a **software fallback** (HKDF of the host Ed25519 key) — an insider host operator who holds the runtime key material can derive it. The sealed artifact defends **at-rest confidentiality-vs-the-operator only**, NOT hardware-rooted protection. Sealed snapshots are wired into the supervisor path **Linux-gated** and apply only where the snapshot path applies (non-networked workspaces). **Remaining ⏳:** the real control-plane KMS, AWS-KMS / Vault BYO-KMS, HSM backing, and the `SevSnp` policy path on real silicon — the hardware-rooted claim is unclaimed. | ◐ Runtime-side sealed format shipped (synthetic-tested). ⏳ CP KMS / AWS-KMS / HSM / real-silicon gate: future. |
+| **Snapshot artifacts are plaintext at rest — PARTIALLY RESOLVED** | **Runtime-side sealed format shipped:** the `ne-seal` crate provides AES-256-GCM chunked-streaming content encryption + a signed `seal.json` envelope (`ne-enclave-seal-v1`, manifest↔seal canonical-hash binding) + a runtime-local attestation gate (`ne_attestation::verify` against the embedded `SealingPolicy`) that must pass before the DEK is released. **Honest ceiling:** the shipped KEK is a **software fallback** (HKDF of the host Ed25519 key) — an insider host operator who holds the runtime key material can derive it. A separate external path is verified only in a local topology with native mTLS, PostgreSQL nonce claims, and OpenBao Transit KEK custody. Sealed snapshots are wired into the supervisor path **Linux-gated** and apply only where the snapshot path applies (non-networked workspaces). **Remaining ⏳:** Vault, cloud KMS, HSM, real-silicon policy validation, enrollment, certificate lifecycle, audit export, HA, multi-region operation, and production deployment validation — the hardware-rooted claim is unclaimed. | ◐ Runtime-side sealed format shipped. ◐ External path verified in one local topology. ⏳ Broader KMS, fleet, and production deployment gates. |
 | **Snapshot/restore serialization under concurrent load** | The supervisor's instances-map mutex is held across the Firecracker pause + snapshot API call, so concurrent snapshots of different workspaces serialize during the capture window. This is an availability/throughput limit, not an isolation weakness — consistent with the existing create/terminate posture and the §9 boot-storm IPC note. Per-instance locking is a planned improvement. | Planned: per-instance locking for snapshot concurrency. |
-| **In-place Pause/Resume API deferred** | After a Firecracker in-place `PATCH /vm Resumed`, the host→guest vsock control channel stops servicing new CONNECTs — the resumed guest is unreachable. The public `PauseWorkspace`/`ResumeWorkspace` API is therefore deferred and returns `Unsupported`; it does not represent a new attack surface. The low-level `crate::firecracker::pause`/`resume` calls remain and are used internally by `WorkspaceManager::snapshot` (pause-before-snapshot, resume-after). **Live-state snapshot is shipped via hot-swap restore** (capture + fresh-process restore + registry swap), which delivers the live-snapshot value — source VM survives reachable — without requiring the in-place resume path. In-place `PauseWorkspace`/`ResumeWorkspace` remains deferred; the fix path (Firecracker fork patch to re-arm the muxer epoll on `PATCH /vm Resumed`) is a future item. | Future: Firecracker fork patch to re-register vsock on in-place resume. |
+| **In-place Pause/Resume API deferred** | After a Firecracker in-place `PATCH /vm Resumed`, the host→guest vsock control channel stops servicing new CONNECTs — the resumed guest is unreachable. The public `PauseWorkspace`/`ResumeWorkspace` API is therefore deferred and returns `Unsupported`; it does not represent a new attack surface. The low-level `crate::firecracker::pause`/`resume` calls remain and are used internally by `WorkspaceManager::snapshot` (pause-before-snapshot, resume-after). **Live-state snapshot is shipped via hot-swap restore** (capture + fresh-process restore + registry swap), which delivers the live-snapshot value — source VM survives reachable — without requiring the in-place resume path. In-place `PauseWorkspace`/`ResumeWorkspace` remains deferred. Any remediation must be compatible with upstream Firecracker integration; this document makes no implementation promise. | Future: upstream-compatible investigation of in-place resume. |
 | **Runtime supply-chain enforcement not absorbed** | OSV / OPA / CVSS enforcement of package installs at execution time is not wired into the standard runtime workspace; it lives in the OpenShell fork. This is distinct from the v0.2.0 signed release bundle, checksums, SPDX SBOM, provenance, and installer verification. | Future: absorb runtime package-policy enforcement into `crates/`. |
 | **Ingress residual risks** | (a) **WebSocket / `Connection: Upgrade` proxying deferred:** low-level hyper 1.x upgrade bridging is disproportionate for the initial implementation; clients attempting a WebSocket upgrade receive a connection error. Not a security control gap — the control plane should not rely on WebSocket ingress until a follow-up ships. (b) **Inbound rate-limiting is partial:** a per-process connection-count cap + header/handshake read timeouts now ship, bounding fd/memory exhaustion; per-workspace / per-IP token buckets and true process/cgroup isolation of the edge from the supervisor remain a flagged future follow-up — operators should front the edge with an upstream LB / rate-limiter until then. (c) **Ingress TLS terminate path unit-tested only:** the e2e exercises the plaintext loopback path (dev mode); the TLS terminate path is covered by unit tests (`crates/ne-ingress`). (d) **Ingress applies to cold-booted networked workspaces only:** warm-pool / forked / snapshot-restored members are non-networked; `Create(tier)` with `network_config` is rejected. This is by design (Firecracker bakes the TAP into vmstate) — it is not a missing control. | (a)(b) Follow-up. (c)(d) Operational / accepted. |
 
