@@ -2,6 +2,14 @@
 
 ## Next release
 
+Control-plane key release now uses `POST /v2/seal/wrap-dek` and
+`POST /v2/seal/release-dek`; v1-only control planes are incompatible. Wrap
+requests now require `workspace_id`, and `CpWrapClient::wrap_dek` takes that
+argument before `snapshot_id`. An HTTP 409 response maps to the dedicated,
+non-retryable `ControlPlaneError::Conflict` result. `SealingPolicy` and
+`SealingTrustAnchor` now reject unknown JSON fields during decoding; producers
+must send only supported policy and trust-anchor fields.
+
 The SEV-SNP policy pins `min_tcb` and `guest_policy` are now JSON strings, in
 both `SealingTrustAnchor::SevSnp` and the `nee attestation verify` policy file.
 They serialize as `"min_tcb": "792633534417207304"` instead of

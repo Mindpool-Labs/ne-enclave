@@ -54,11 +54,22 @@ pub struct ReportFields {
     /// AMD `MEASUREMENT` (384-bit). Offset 0x90, len 48. Host-CVM launch
     /// digest, distinct from the per-workspace measurement.
     pub measurement: [u8; 48],
+    /// AMD `REPORT_ID` (256-bit). Offset 0x140. This value is inside the
+    /// firmware-signed report body and is exposed only through [`Self::report_id`].
+    report_id: [u8; 32],
     /// AMD `REPORTED_TCB` (u64). Offset 0x180 — the TCB the VCEK was signed
     /// against (distinct from `CURRENT_TCB` at 0x38).
     pub reported_tcb: u64,
     /// AMD `CHIP_ID` (512-bit). Offset 0x1A0, len 64.
     pub chip_id: [u8; 64],
+}
+
+impl ReportFields {
+    /// Return the VCEK-signed AMD `REPORT_ID` bytes.
+    #[must_use]
+    pub const fn report_id(&self) -> &[u8; 32] {
+        &self.report_id
+    }
 }
 
 /// Parse the firmware Attestation Report out of `buf`, returning the fields
@@ -83,6 +94,8 @@ pub fn parse(buf: &[u8]) -> Option<ReportFields> {
         |o: usize| -> Option<[u8; 64]> { <[u8; 64]>::try_from(buf.get(o..o + 64)?).ok() };
     let arr48_at =
         |o: usize| -> Option<[u8; 48]> { <[u8; 48]>::try_from(buf.get(o..o + 48)?).ok() };
+    let arr32_at =
+        |o: usize| -> Option<[u8; 32]> { <[u8; 32]>::try_from(buf.get(o..o + 32)?).ok() };
     // Offsets transcribed from AMD SEV-SNP FW ABI Table `ATTESTATION_REPORT`
     // and cross-verified against virtee/sev + go-sev-guest (see module doc).
     // The Step-4 tests assert the load-bearing ones, so a transcription error
@@ -93,6 +106,7 @@ pub fn parse(buf: &[u8]) -> Option<ReportFields> {
         sig_algo: u32_at(0x34)?, // AMD SIG_ALGO       | go-sev-guest report[0x34:0x38]
         report_data: arr64_at(0x50)?, // AMD REPORT_DATA    | go-sev-guest data[0x50:0x90]
         measurement: arr48_at(0x90)?, // AMD MEASUREMENT    | go-sev-guest data[0x90:0xC0]
+        report_id: arr32_at(0x140)?, // AMD REPORT_ID      | go-sev-guest data[0x140:0x160]
         reported_tcb: u64_at(0x180)?, // AMD REPORTED_TCB   | go-sev-guest data[0x180:0x188]
         chip_id: arr64_at(0x1A0)?, // AMD CHIP_ID        | go-sev-guest data[0x1A0:0x1E0]
     })
@@ -168,6 +182,7 @@ mod tests {
         // Fixed-size byte arrays at their transcribed offsets.
         buf[0x50..0x90].copy_from_slice(&[0xAB; 64]); // report_data
         buf[0x90..0xC0].copy_from_slice(&[0xCD; 48]); // measurement
+        buf[0x140..0x160].copy_from_slice(&[0xD0; 32]); // report_id
         buf[0x1A0..0x1E0].copy_from_slice(&[0xEF; 64]); // chip_id
 
         let f = parse(&buf).expect("REPORT_SIZE buffer must parse");
@@ -177,6 +192,7 @@ mod tests {
         assert_eq!(f.reported_tcb, 0xCAFE_BABE_DEAD_BEEF);
         assert_eq!(f.report_data, [0xAB; 64]);
         assert_eq!(f.measurement, [0xCD; 48]);
+        assert_eq!(f.report_id(), &[0xD0; 32]);
         assert_eq!(f.chip_id, [0xEF; 64]);
     }
 

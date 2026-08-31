@@ -32,12 +32,13 @@ use crate::types::{SealEnvelope, SealingPolicy};
 /// returns verbatim in `DekEnvelope`: the SW backend returns a real 12-byte
 /// nonce; the KMS backend returns an empty nonce.
 pub trait CpWrapClient: Send + Sync + std::fmt::Debug {
-    /// Wrap the 32-byte DEK for `snapshot_id` / `manifest_hash` under the
-    /// CP-held KEK, evaluated against `policy`.
+    /// Wrap the 32-byte DEK for the source `workspace_id` / `snapshot_id` /
+    /// `manifest_hash` under the CP-held KEK, evaluated against `policy`.
     #[allow(clippy::type_complexity)]
     fn wrap_dek<'a>(
         &'a self,
         dek: &'a [u8; 32],
+        workspace_id: &'a str,
         snapshot_id: &'a str,
         manifest_hash: &'a str,
         policy: &'a SealingPolicy,
@@ -60,6 +61,9 @@ pub enum ControlPlaneError {
     /// CP rejected the client's credentials (HTTP 401).
     #[error("control plane unauthorized")]
     Unauthorized,
+    /// CP rejected an incompatible existing snapshot binding (HTTP 409).
+    #[error("control-plane snapshot binding conflict")]
+    Conflict,
     /// CP returned a malformed/unparseable body or a DEK of the wrong size.
     #[error("control plane response malformed: {0}")]
     BadResponse(String),
@@ -89,7 +93,7 @@ pub struct ControlPlaneTlsFiles {
     pub client_key: PathBuf,
 }
 
-/// Wire request to the CP `/v1/seal/release-dek` endpoint.
+/// Wire request to the CP `/v2/seal/release-dek` endpoint.
 ///
 /// NOTE on the two nonces (do not conflate):
 /// - `wrap_nonce_b64`: the AES-GCM nonce used to wrap the DEK. Read back from
@@ -119,10 +123,11 @@ struct DenialResponse<'a> {
     reason: &'a str,
 }
 
-/// Wire request to the CP `/v1/seal/wrap-dek` endpoint at seal time.
+/// Wire request to the CP `/v2/seal/wrap-dek` endpoint at seal time.
 #[derive(serde::Serialize)]
 struct WrapReq<'a> {
     dek_b64: String,
+    workspace_id: &'a str,
     snapshot_id: &'a str,
     manifest_canonical_sha256: &'a str,
     policy: &'a SealingPolicy,
@@ -134,14 +139,14 @@ struct WrapOk {
     wrap_nonce_b64: String,
 }
 
-/// HTTPS client for the CP `/v1/seal/release-dek` endpoint.
+/// HTTPS client for the CP `/v2/seal/release-dek` endpoint.
 ///
 /// The client implements [`ControlPlaneKeyRelease`] over HTTPS. The
 /// `NotImplementedControlPlaneClient` stub in `key_release.rs` is retained for
 /// negative tests and placeholder configuration.
 pub struct ControlPlaneKeyReleaseClient {
-    /// Base URL ending in `/v1` (e.g. `https://cp.example.com/v1`). The path
-    /// `/seal/release-dek` is appended.
+    /// Base URL for the control-plane service. A legacy trailing `/v1` is
+    /// accepted as configuration input, but requests use the `/v2` protocol.
     endpoint: String,
     api_key: Option<Zeroizing<String>>,
     http: reqwest::Client,
@@ -304,8 +309,20 @@ impl ControlPlaneKeyReleaseClient {
             Ok(DenialResponse {
                 reason: "unwrap_failed",
             }) => "unwrap_failed",
+            Ok(DenialResponse {
+                reason: "snapshot_binding_conflict",
+            }) => "snapshot_binding_conflict",
             _ => "denied",
         }
+    }
+
+    fn v2_url(&self, operation: &str) -> String {
+        let endpoint = self.endpoint.trim_end_matches('/');
+        let endpoint = endpoint
+            .strip_suffix("/v1")
+            .or_else(|| endpoint.strip_suffix("/v2"))
+            .unwrap_or(endpoint);
+        format!("{endpoint}/v2/seal/{operation}")
     }
 
     fn validate_wrap_envelope(
@@ -349,7 +366,7 @@ impl ControlPlaneKeyRelease for ControlPlaneKeyReleaseClient {
                 evidence,
                 nonce_b64: Self::attestation_nonce_b64(evidence),
             };
-            let url = format!("{}/seal/release-dek", self.endpoint.trim_end_matches('/'));
+            let url = self.v2_url("release-dek");
             let resp = self.post(&url).json(&body).send().await.map_err(|e| {
                 SealError::ControlPlaneRelease(ControlPlaneError::Transport(e.to_string()))
             })?;
@@ -369,6 +386,8 @@ impl ControlPlaneKeyRelease for ControlPlaneKeyReleaseClient {
                     ))
                 })?;
                 Ok(Zeroizing::new(dek))
+            } else if status == reqwest::StatusCode::CONFLICT {
+                Err(SealError::ControlPlaneRelease(ControlPlaneError::Conflict))
             } else if status == reqwest::StatusCode::UNAUTHORIZED {
                 Err(SealError::ControlPlaneRelease(
                     ControlPlaneError::Unauthorized,
@@ -390,6 +409,7 @@ impl CpWrapClient for ControlPlaneKeyReleaseClient {
     fn wrap_dek<'a>(
         &'a self,
         dek: &'a [u8; 32],
+        workspace_id: &'a str,
         snapshot_id: &'a str,
         manifest_hash: &'a str,
         policy: &'a SealingPolicy,
@@ -397,11 +417,12 @@ impl CpWrapClient for ControlPlaneKeyReleaseClient {
         Box::pin(async move {
             let body = WrapReq {
                 dek_b64: B64.encode(dek),
+                workspace_id,
                 snapshot_id,
                 manifest_canonical_sha256: manifest_hash,
                 policy,
             };
-            let url = format!("{}/seal/wrap-dek", self.endpoint.trim_end_matches('/'));
+            let url = self.v2_url("wrap-dek");
             let resp = self.post(&url).json(&body).send().await.map_err(|e| {
                 SealError::ControlPlaneRelease(ControlPlaneError::Transport(e.to_string()))
             })?;
@@ -421,6 +442,8 @@ impl CpWrapClient for ControlPlaneKeyReleaseClient {
                 Self::validate_wrap_envelope(&wrapped, &nonce)
                     .map_err(SealError::ControlPlaneRelease)?;
                 Ok((wrapped, nonce))
+            } else if status == reqwest::StatusCode::CONFLICT {
+                Err(SealError::ControlPlaneRelease(ControlPlaneError::Conflict))
             } else if status == reqwest::StatusCode::UNAUTHORIZED {
                 Err(SealError::ControlPlaneRelease(
                     ControlPlaneError::Unauthorized,
@@ -486,7 +509,13 @@ mod tests {
         .expect("mTLS client");
 
         let (wrapped, nonce) = client
-            .wrap_dek(&[0x22; 32], "01S", "mh", &seal_cp().policy)
+            .wrap_dek(
+                &[0x22; 32],
+                "source-workspace",
+                "01S",
+                "mh",
+                &seal_cp().policy,
+            )
             .await
             .expect("wrap reaches server");
         assert_eq!(wrapped, vec![0xA5; 48]);
@@ -502,6 +531,12 @@ mod tests {
             *server.authorizations.lock().expect("header lock"),
             vec![None, None]
         );
+        let requests = server.requests.lock().expect("request lock");
+        assert!(requests[0].starts_with("POST /v2/seal/wrap-dek HTTP/1.1"));
+        let body = requests[0].split_once("\r\n\r\n").expect("HTTP body").1;
+        let value: serde_json::Value = serde_json::from_str(body).expect("wrap JSON");
+        assert_eq!(value["workspace_id"], "source-workspace");
+        assert!(requests[1].starts_with("POST /v2/seal/release-dek HTTP/1.1"));
     }
 
     #[tokio::test]
@@ -651,7 +686,7 @@ mod tests {
 
         assert!(
             client
-                .wrap_dek(&[0x33; 32], "01S", "mh", &seal_cp().policy)
+                .wrap_dek(&[0x33; 32], "ws", "01S", "mh", &seal_cp().policy)
                 .await
                 .is_err()
         );
@@ -690,7 +725,7 @@ mod tests {
 
         assert!(
             client
-                .wrap_dek(&[0x55; 32], "01S", "mh", &seal_cp().policy)
+                .wrap_dek(&[0x55; 32], "ws", "01S", "mh", &seal_cp().policy)
                 .await
                 .is_err()
         );
@@ -815,6 +850,7 @@ mod tests {
         wrong_ca: PathBuf,
         handler_entries: Arc<AtomicUsize>,
         authorizations: Arc<Mutex<Vec<Option<String>>>>,
+        requests: Arc<Mutex<Vec<String>>>,
         task: tokio::task::JoinHandle<()>,
         _dir: tempfile::TempDir,
     }
@@ -896,8 +932,10 @@ mod tests {
         let endpoint = format!("https://{}/v1", listener.local_addr().expect("address"));
         let handler_entries = Arc::new(AtomicUsize::new(0));
         let authorizations = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let entries = Arc::clone(&handler_entries);
         let headers = Arc::clone(&authorizations);
+        let captured_requests = Arc::clone(&requests);
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let task = tokio::spawn(async move {
             for _ in 0..connection_count {
@@ -914,10 +952,14 @@ mod tests {
                         .map(|value| value.trim().to_string())
                 });
                 headers.lock().expect("header lock").push(authorization);
+                captured_requests
+                    .lock()
+                    .expect("request lock")
+                    .push(request.to_string());
                 entries.fetch_add(1, Ordering::SeqCst);
                 let response = redirect_location.as_ref().map_or_else(
                     || {
-                        let body = if request.starts_with("POST /v1/seal/wrap-dek ") {
+                        let body = if request.starts_with("POST /v2/seal/wrap-dek ") {
                             format!(
                                 r#"{{"wrapped_dek_b64":"{}","wrap_nonce_b64":"{}"}}"#,
                                 B64.encode([0xA5; 48]),
@@ -954,6 +996,7 @@ mod tests {
             wrong_ca,
             handler_entries,
             authorizations,
+            requests,
             task,
             _dir: dir,
         }
@@ -1019,7 +1062,7 @@ mod tests {
             .expect("loopback development client");
 
             let err = client
-                .wrap_dek(&[0x66; 32], "01S", "mh", &seal_cp().policy)
+                .wrap_dek(&[0x66; 32], "ws", "01S", "mh", &seal_cp().policy)
                 .await
                 .expect_err(case);
             assert!(matches!(
@@ -1058,7 +1101,7 @@ mod tests {
             .expect("loopback development client");
 
             let result = client
-                .wrap_dek(&[0x66; 32], "01S", "mh", &seal_cp().policy)
+                .wrap_dek(&[0x66; 32], "ws", "01S", "mh", &seal_cp().policy)
                 .await
                 .expect(case);
             assert_eq!(result, (wrapped, nonce));
@@ -1071,6 +1114,10 @@ mod tests {
         for (body, expected) in [
             (r#"{"reason":"nonce_replay"}"#, "nonce_replay"),
             (r#"{"reason":"unwrap_failed"}"#, "unwrap_failed"),
+            (
+                r#"{"reason":"snapshot_binding_conflict"}"#,
+                "snapshot_binding_conflict",
+            ),
             ("not-json", "denied"),
             (r#"{"reason":"unknown_reason"}"#, "denied"),
             (
@@ -1101,6 +1148,10 @@ mod tests {
         for (body, expected) in [
             (r#"{"reason":"nonce_replay"}"#, "nonce_replay"),
             (r#"{"reason":"unwrap_failed"}"#, "unwrap_failed"),
+            (
+                r#"{"reason":"snapshot_binding_conflict"}"#,
+                "snapshot_binding_conflict",
+            ),
             ("not-json", "denied"),
             (r#"{"reason":"unknown_reason"}"#, "denied"),
             (
@@ -1116,7 +1167,7 @@ mod tests {
             )
             .expect("loopback development client");
             let err = client
-                .wrap_dek(&[0x66; 32], "01S", "mh", &seal_cp().policy)
+                .wrap_dek(&[0x66; 32], "ws", "01S", "mh", &seal_cp().policy)
                 .await
                 .expect_err("wrap must be denied");
             assert!(matches!(
@@ -1143,6 +1194,27 @@ mod tests {
             err,
             SealError::ControlPlaneRelease(ControlPlaneError::Unauthorized)
         ));
+    }
+
+    #[tokio::test]
+    async fn wrap_conflict_409_maps_to_a_dedicated_non_retryable_error() {
+        let (url, server) = mock_cp(409, r#"{"reason":"snapshot_binding_conflict"}"#).await;
+        let client = ControlPlaneKeyReleaseClient::new_development(
+            url,
+            "key".into(),
+            Arc::new(|| 1_700_000_020),
+        )
+        .expect("loopback development client");
+
+        let err = client
+            .wrap_dek(&[0x66; 32], "ws", "01S", "mh", &seal_cp().policy)
+            .await
+            .expect_err("conflict must fail without retry");
+        assert!(matches!(
+            err,
+            SealError::ControlPlaneRelease(ControlPlaneError::Conflict)
+        ));
+        server.await.expect("server task");
     }
 
     #[tokio::test]
