@@ -686,10 +686,10 @@ pub fn verify(ev: &Evidence, params: &VerifyParams<'_>) -> VerifyOutcome {
             let Some(var_data_modulus) = ak_modulus_from_jwk(var_data) else {
                 return VerifyOutcome::Failed(FailReason::MalformedProof);
             };
-            let Some(tpm2b_modulus) = rsa_modulus_from_tpm2b_public(ak_pub_tpm2b) else {
+            let Ok(tpm2b_modulus) = azure_ak_rsa_modulus(ak_pub_tpm2b) else {
                 return VerifyOutcome::Failed(FailReason::MalformedProof);
             };
-            if var_data_modulus != tpm2b_modulus {
+            if var_data_modulus.as_slice() != tpm2b_modulus {
                 return VerifyOutcome::Failed(FailReason::ReportDataMismatch);
             }
             // L2b: parse the TPM2B_ATTEST + assert the embedded qualifying-data
@@ -721,62 +721,101 @@ pub fn verify(ev: &Evidence, params: &VerifyParams<'_>) -> VerifyOutcome {
 /// The TPM algorithm id for RSA (`TPM_ALG_RSA == 0x0001`). A `TPM2B_PUBLIC` whose
 /// `type` field is this describes an RSA key.
 const TPM_ALG_RSA: u16 = 0x0001;
+const TPM_ALG_NULL: u16 = 0x0010;
+const TPM_ALG_RSASSA: u16 = 0x0014;
+const TPM_ALG_SHA256: u16 = 0x000B;
 
-/// Extract the RSA public modulus (big-endian, 256 bytes for RSA-2048) from a
-/// `TPM2B_PUBLIC` marshaled blob (`tpm2_readpublic -f tss` output).
+/// Azure AK `TPM2B_PUBLIC` parsing failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid Azure AK TPM2B_PUBLIC")]
+pub struct AttestationParseError;
+
+/// Extract the canonical 256-byte RSA-2048 modulus from one exact Azure AK
+/// `TPM2B_PUBLIC` public area.
 ///
-/// Walks the canonical `TPMT_PUBLIC` fields (type, nameAlg, objectAttributes,
-/// authPolicy `TPM2B_DIGEST`, the `TPMT_SYM_DEF_OBJECT` + `TPMT_RSA_SCHEME`
-/// selectors, `TPMI_RSA_KEY_BITS`, `TPMI_RSA_EXONENT` `TPM2B`) to reach the
-/// `TPM2B_PUBLIC_KEY_RSA` modulus. Returns `None` if the blob is too short,
-/// not an RSA key, or the modulus length is implausible (fail-closed). Pure.
+/// # Errors
 ///
-/// Grounded in an on-box `tpm2_readpublic -f tss` capture:
-/// modulus `bac197b4…` at TPM2B offset 24 for the default Azure AK.
-fn rsa_modulus_from_tpm2b_public(ak_pub_tpm2b: &[u8]) -> Option<Vec<u8>> {
-    // TPM2B_PUBLIC: u16 size prefix (BE) + TPMT_PUBLIC body.
-    let body = ak_pub_tpm2b.get(2..)?;
-    // type: TPMI_ALG_PUBLIC (u16 BE) — must be RSA.
-    let key_type = u16::from_be_bytes([body[0], body[1]]);
-    if key_type != TPM_ALG_RSA {
-        return None;
+/// Returns [`AttestationParseError`] for malformed, non-RSA, non-2048-bit,
+/// truncated, or trailing input.
+pub fn azure_ak_rsa_modulus(ak_pub_tpm2b: &[u8]) -> Result<[u8; 256], AttestationParseError> {
+    fn read_u16(input: &[u8], offset: &mut usize) -> Result<u16, AttestationParseError> {
+        let end = offset.checked_add(2).ok_or(AttestationParseError)?;
+        let bytes: [u8; 2] = input
+            .get(*offset..end)
+            .ok_or(AttestationParseError)?
+            .try_into()
+            .map_err(|_| AttestationParseError)?;
+        *offset = end;
+        Ok(u16::from_be_bytes(bytes))
     }
-    // nameAlg: TPMI_ALG_HASH (u16 BE) — skip.
-    let mut o = 4;
-    // objectAttributes: TPMA_OBJECT (u32 BE) — skip.
-    o += 4;
-    // authPolicy: TPM2B_DIGEST (u16 BE len + bytes).
-    let ap_len = u16::from_be_bytes([body[o], body[o + 1]]) as usize;
-    o += 2 + ap_len;
-    // symmetric: TPMT_SYM_DEF_OBJECT = alg(u16 BE) + union. For the AK the alg
-    // is NULL (0x0010); the union is alg-dependent but for NULL the marshaler
-    // writes only the alg selector (the union members are absent/zero-sized).
-    // To be robust, skip the selector then handle NULL specially: NULL writes
-    // alg(2) + keyBits(0) + mode(0) = 2 bytes total in the canonical tss form.
-    let sym_alg = u16::from_be_bytes([body[o], body[o + 1]]);
-    o += 2;
-    if sym_alg == 0x0010 {
-        // NULL: no further union bytes (keyBits + mode absent).
-    } else {
-        // Non-NULL symmetric (unexpected for a restricted signing key): we cannot
-        // safely size the union — fail-closed rather than guess.
-        return None;
+
+    fn read_u32(input: &[u8], offset: &mut usize) -> Result<u32, AttestationParseError> {
+        let end = offset.checked_add(4).ok_or(AttestationParseError)?;
+        let bytes: [u8; 4] = input
+            .get(*offset..end)
+            .ok_or(AttestationParseError)?
+            .try_into()
+            .map_err(|_| AttestationParseError)?;
+        *offset = end;
+        Ok(u32::from_be_bytes(bytes))
     }
-    // scheme: TPMT_RSA_SCHEME = alg(u16 BE) + hashAlg(u16 BE). rsassa=0x0014.
-    o += 4;
-    // keyBits: TPMI_RSA_KEY_BITS (u16 BE) — e.g. 2048. Skip.
-    o += 2;
-    // exponent: TPMI_RSA_EXONENT is a u32 (BE); 0 means the default 65537.
-    // (NOT a TPM2B — this is the field identified by the on-box walk.)
-    o += 4;
-    // modulus: TPM2B_PUBLIC_KEY_RSA = u16 BE len + bytes.
-    let mod_len = u16::from_be_bytes([body[o], body[o + 1]]) as usize;
-    o += 2;
-    // RSA-2048 → 256 bytes; accept 128..512 (covers 1024..4096).
-    if !(128..=512).contains(&mod_len) {
-        return None;
+
+    fn read_bytes<'a>(
+        input: &'a [u8],
+        offset: &mut usize,
+        len: usize,
+    ) -> Result<&'a [u8], AttestationParseError> {
+        let end = offset.checked_add(len).ok_or(AttestationParseError)?;
+        let bytes = input.get(*offset..end).ok_or(AttestationParseError)?;
+        *offset = end;
+        Ok(bytes)
     }
-    body.get(o..o + mod_len).map(<[u8]>::to_vec)
+
+    let declared_len = u16::from_be_bytes(
+        ak_pub_tpm2b
+            .get(..2)
+            .ok_or(AttestationParseError)?
+            .try_into()
+            .map_err(|_| AttestationParseError)?,
+    ) as usize;
+    let body = ak_pub_tpm2b.get(2..).ok_or(AttestationParseError)?;
+    if body.len() != declared_len {
+        return Err(AttestationParseError);
+    }
+
+    let mut offset = 0;
+    if read_u16(body, &mut offset)? != TPM_ALG_RSA {
+        return Err(AttestationParseError);
+    }
+    let _name_alg = read_u16(body, &mut offset)?;
+    let _object_attributes = read_u32(body, &mut offset)?;
+    let auth_policy_len = usize::from(read_u16(body, &mut offset)?);
+    let _auth_policy = read_bytes(body, &mut offset, auth_policy_len)?;
+    if read_u16(body, &mut offset)? != TPM_ALG_NULL {
+        return Err(AttestationParseError);
+    }
+    if read_u16(body, &mut offset)? != TPM_ALG_RSASSA
+        || read_u16(body, &mut offset)? != TPM_ALG_SHA256
+    {
+        return Err(AttestationParseError);
+    }
+    if read_u16(body, &mut offset)? != 2048 {
+        return Err(AttestationParseError);
+    }
+    let exponent = read_u32(body, &mut offset)?;
+    if exponent != 0 && exponent != 65_537 {
+        return Err(AttestationParseError);
+    }
+    if read_u16(body, &mut offset)? != 256 {
+        return Err(AttestationParseError);
+    }
+    let modulus: [u8; 256] = read_bytes(body, &mut offset, 256)?
+        .try_into()
+        .map_err(|_| AttestationParseError)?;
+    if offset != body.len() {
+        return Err(AttestationParseError);
+    }
+    Ok(modulus)
 }
 
 /// Verify an AK RSASSA-PKCS1-v1.5-SHA256 signature over a message, given the
@@ -1311,6 +1350,31 @@ mod tests {
     }
 
     #[test]
+    fn sev_snp_rejects_report_id_mutation_after_signing() {
+        let (mut evidence, nonce, chain) = sev_snp_chain_ok_evidence();
+        let Proof::SevSnp { report, .. } = &mut evidence.proof else {
+            panic!("expected SEV-SNP proof");
+        };
+        report[0x140] ^= 0xFF;
+
+        assert_eq!(
+            verify(
+                &evidence,
+                &sev_snp_params(
+                    &nonce,
+                    TrustAnchor::SevSnp {
+                        amd_product_root: &chain.root,
+                        expected_host_cvm_meas: None,
+                        min_tcb: 0,
+                        guest_policy: 0,
+                    },
+                ),
+            ),
+            VerifyOutcome::Failed(FailReason::BadSignature)
+        );
+    }
+
+    #[test]
     fn sev_snp_rejects_tcb_below_min() {
         // Chain-valid evidence (reported_tcb == 0); anchor pins min_tcb = 1.
         let (ev, nonce, chain) = sev_snp_chain_ok_evidence();
@@ -1445,7 +1509,7 @@ mod tests {
 
     /// Build a synthetic `TPM2B_PUBLIC` (tss marshaled) for an RSA-2048 key with
     /// the given modulus, matching the on-box `tpm2_readpublic -f tss` layout
-    /// (the field walk `rsa_modulus_from_tpm2b_public` parses).
+    /// (the field walk `azure_ak_rsa_modulus` parses).
     fn synthetic_tpm2b_public(modulus_be: &[u8]) -> Vec<u8> {
         // TPMT_PUBLIC body: type=RSA, nameAlg=sha256, attrs, empty authPolicy,
         // sym=NULL, scheme=rsassa+sha256, keyBits=2048, exponent(empty=65537),
@@ -1467,6 +1531,45 @@ mod tests {
         let mut out = size.to_be_bytes().to_vec();
         out.extend_from_slice(&tp);
         out
+    }
+
+    #[test]
+    fn azure_ak_public_parser_returns_only_the_canonical_rsa_2048_modulus() {
+        let modulus = [0xA5; 256];
+        let public = synthetic_tpm2b_public(&modulus);
+        assert_eq!(
+            azure_ak_rsa_modulus(&public).expect("RSA-2048 public area"),
+            modulus
+        );
+
+        // `nameAlg` changes the key name representation but not the RSA public
+        // modulus. Identity consumers receive only the canonical modulus.
+        let mut alternate_representation = public;
+        alternate_representation[4..6].copy_from_slice(&0x000Cu16.to_be_bytes());
+        assert_eq!(
+            azure_ak_rsa_modulus(&alternate_representation)
+                .expect("alternate valid public representation"),
+            modulus
+        );
+    }
+
+    #[test]
+    fn azure_ak_public_parser_rejects_ambiguous_or_invalid_public_areas() {
+        let public = synthetic_tpm2b_public(&[0xA5; 256]);
+
+        let mut non_rsa = public.clone();
+        non_rsa[2..4].copy_from_slice(&0x0023u16.to_be_bytes());
+        assert!(azure_ak_rsa_modulus(&non_rsa).is_err());
+
+        let mut non_2048 = public.clone();
+        non_2048[18..20].copy_from_slice(&3072u16.to_be_bytes());
+        assert!(azure_ak_rsa_modulus(&non_2048).is_err());
+
+        assert!(azure_ak_rsa_modulus(&public[..public.len() - 1]).is_err());
+
+        let mut trailing = public;
+        trailing.push(0x00);
+        assert!(azure_ak_rsa_modulus(&trailing).is_err());
     }
 
     /// Build a full synthetic `Proof::SevSnpAzure` that passes the L1+L2 verify

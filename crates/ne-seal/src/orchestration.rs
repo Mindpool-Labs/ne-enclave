@@ -172,7 +172,15 @@ pub async fn seal_artifacts(
             let cp = cp.ok_or(SealError::ControlPlaneRelease(
                 ControlPlaneError::Unconfigured,
             ))?;
-            let (wrapped, nonce) = cp.wrap_dek(&dek, &snapshot_id, &mh, &policy).await?;
+            let (wrapped, nonce) = cp
+                .wrap_dek(
+                    &dek,
+                    &manifest.created_from_workspace_id,
+                    &snapshot_id,
+                    &mh,
+                    &policy,
+                )
+                .await?;
             DekEnvelope {
                 kek_provider: KekProvider::ControlPlane,
                 wrapped_dek: wrapped,
@@ -734,6 +742,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     struct MockCp {
         wraps: std::sync::Arc<std::sync::Mutex<Vec<(Vec<u8>, [u8; 32])>>>,
+        workspace_ids: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         release_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
     }
 
@@ -749,6 +758,7 @@ mod tests {
         fn wrap_dek<'a>(
             &'a self,
             dek: &'a [u8; 32],
+            workspace_id: &'a str,
             _snapshot_id: &'a str,
             _manifest_hash: &'a str,
             _policy: &'a SealingPolicy,
@@ -763,6 +773,10 @@ mod tests {
                     .lock()
                     .expect("mock wraps lock")
                     .push((blob.clone(), *dek));
+                self.workspace_ids
+                    .lock()
+                    .expect("mock workspace IDs lock")
+                    .push(workspace_id.to_string());
                 Ok((blob, vec![9u8; 12]))
             })
         }
@@ -840,6 +854,10 @@ mod tests {
             seal.dek_envelope.wrapped_dek,
             cp.wraps.lock().unwrap().last().unwrap().0
         );
+        assert_eq!(
+            *cp.workspace_ids.lock().expect("mock workspace IDs lock"),
+            vec![manifest.created_from_workspace_id.clone()]
+        );
     }
 
     /// `ControlPlane` provider without a CP client is a misconfiguration that
@@ -892,7 +910,7 @@ mod tests {
         let dek = [0x42u8; 32];
         let policy = policy_with_signer(host().verifying_key());
         let (wrapped, nonce) = cp
-            .wrap_dek(&dek, "01S", "mh", &policy)
+            .wrap_dek(&dek, "source-workspace", "01S", "mh", &policy)
             .await
             .expect("wrap_dek");
 

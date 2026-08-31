@@ -20,6 +20,7 @@ pub const POLICY_DOMAIN_TAG: &str = "ne-enclave-sealing-policy-v1";
 /// The attestation policy a sealed snapshot demands at restore time. Embedded
 /// in the signed [`SealEnvelope`]; the gate's source of truth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SealingPolicy {
     /// Provider types the gate will accept (`[Software]` for dev,
     /// `[SevSnp]` for confidential prod).
@@ -35,7 +36,7 @@ pub struct SealingPolicy {
 
 /// Owned, serializable mirror of `ne_attestation::TrustAnchor`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum SealingTrustAnchor {
     /// Software trust anchor: pin the expected Ed25519 verifying key.
@@ -207,6 +208,37 @@ mod tests {
         let p = sample_policy();
         let v = serde_json::to_value(&p.trust_anchor).unwrap();
         assert_eq!(v["kind"], "software");
+    }
+
+    #[test]
+    fn policy_inputs_reject_unknown_fields() {
+        let mut policy = serde_json::to_value(sample_policy()).unwrap();
+        policy
+            .as_object_mut()
+            .expect("policy object")
+            .insert("unknown_policy_field".into(), serde_json::Value::Bool(true));
+        assert!(serde_json::from_value::<SealingPolicy>(policy).is_err());
+
+        let mut policy = serde_json::to_value(sample_policy()).unwrap();
+        policy["trust_anchor"]
+            .as_object_mut()
+            .expect("trust anchor object")
+            .insert("unknown_anchor_field".into(), serde_json::Value::Bool(true));
+        assert!(serde_json::from_value::<SealingPolicy>(policy).is_err());
+    }
+
+    #[test]
+    fn policy_provider_lists_remain_structurally_valid_public_json() {
+        for providers in [
+            Vec::new(),
+            vec![ProviderType::Software, ProviderType::Software],
+        ] {
+            let mut policy = sample_policy();
+            policy.accept_provider_types = providers;
+            let json = serde_json::to_string(&policy).expect("serialize policy");
+            let decoded: SealingPolicy = serde_json::from_str(&json).expect("decode policy");
+            assert_eq!(decoded, policy);
+        }
     }
 
     /// A `SevSnp` anchor's 64-bit pins survive the wire exactly, and land as
