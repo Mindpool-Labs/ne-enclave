@@ -23,6 +23,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::fleet::RunnerCapacity;
+
 /// Wire protocol version. Bumped on incompatible request/response
 /// schema changes; clients refuse to talk to a mismatched supervisor.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -76,6 +78,8 @@ pub enum SupervisorRequest {
     ForkWorkspace(ForkRequest),
     /// Query the current warm-pool status.
     PoolStatus(PoolStatusRequest),
+    /// Query the supervisor-owned atomic runtime capacity inventory.
+    CapacitySnapshot(CapacitySnapshotRequest),
     /// Start exposing a guest port via host-based ingress routing.
     /// The supervisor registers the port in the workspace's
     /// `NetworkConfig::exposed_ports` and signals the ingress router.
@@ -109,7 +113,10 @@ impl SupervisorRequest {
             Self::PoolStatus(_) => Some(Op::WarmPool),
             Self::ExposePort(_) | Self::UnexposePort(_) => Some(Op::Ingress),
             Self::GetAttestationEvidence(_) => Some(Op::Attest),
-            Self::Ping | Self::GetCapabilities | Self::ListEvents(_) => None,
+            Self::Ping
+            | Self::GetCapabilities
+            | Self::ListEvents(_)
+            | Self::CapacitySnapshot(_) => None,
         }
     }
 }
@@ -410,6 +417,11 @@ pub struct ForkInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PoolStatusRequest {}
 
+/// Request the current atomic runtime capacity inventory. No fields are
+/// needed because the snapshot belongs to the supervisor process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CapacitySnapshotRequest {}
+
 /// Snapshot of the warm pool's state for operators.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolStatusInfo {
@@ -629,6 +641,8 @@ pub enum SupervisorResponse {
     WorkspaceForked(ForkInfo),
     /// Reply to a successful [`SupervisorRequest::PoolStatus`].
     PoolStatus(PoolStatusInfo),
+    /// Reply to a successful [`SupervisorRequest::CapacitySnapshot`].
+    CapacitySnapshot(RunnerCapacity),
     /// Reply to a successful [`SupervisorRequest::ExposePort`].
     PortExposed {
         /// Echoes the [`ExposePortRequest::workspace_id`].
@@ -742,6 +756,39 @@ pub enum SupervisorErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Break caught: removing the host capacity IPC tag would make callers
+    // unable to obtain the atomic inventory snapshot.
+    #[test]
+    fn capacity_snapshot_request_and_response_roundtrip() {
+        let request = SupervisorRequest::CapacitySnapshot(CapacitySnapshotRequest {});
+        let request_json = serde_json::to_string(&request).expect("serialize request");
+        assert_eq!(request_json, r#"{"op":"capacity_snapshot"}"#);
+        let request_back: SupervisorRequest =
+            serde_json::from_str(&request_json).expect("deserialize request");
+        assert_eq!(request_back, request);
+
+        let response = SupervisorResponse::CapacitySnapshot(ne_protocol_capacity());
+        let response_json = serde_json::to_string(&response).expect("serialize response");
+        let response_back: SupervisorResponse =
+            serde_json::from_str(&response_json).expect("deserialize response");
+        assert_eq!(response_back, response);
+    }
+
+    fn ne_protocol_capacity() -> RunnerCapacity {
+        RunnerCapacity {
+            revision: 7,
+            configured_workspace_ceiling: 3,
+            registered_workspaces: 1,
+            resident_workspaces: 1,
+            runnable_workspaces: 1,
+            allocated_cpu_millicores: 1_000,
+            allocated_memory_bytes: 1_024,
+            warm_pool_reserved_slots: 0,
+            profiles: vec![crate::profile::ExecutionProfile::Standard],
+            operations: vec![crate::profile::WorkspaceOperation::Create],
+        }
+    }
 
     #[test]
     fn ping_request_roundtrips() {

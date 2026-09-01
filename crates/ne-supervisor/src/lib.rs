@@ -18,6 +18,7 @@
 
 pub mod attestation_factory;
 pub mod audit;
+mod capacity;
 pub mod command;
 #[cfg(target_os = "linux")]
 pub mod firecracker;

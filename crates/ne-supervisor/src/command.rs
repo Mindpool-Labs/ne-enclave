@@ -88,6 +88,7 @@ impl Dispatcher {
             SupervisorRequest::RestoreWorkspace(r) => self.workspaces.restore(r).await,
             SupervisorRequest::ForkWorkspace(r) => self.workspaces.fork(r).await,
             SupervisorRequest::PoolStatus(r) => self.workspaces.pool_status(r).await,
+            SupervisorRequest::CapacitySnapshot(_) => self.workspaces.capacity_snapshot(),
             SupervisorRequest::ExposePort(r) => self.workspaces.expose_port(r).await,
             SupervisorRequest::UnexposePort(r) => self.workspaces.unexpose_port(r).await,
             SupervisorRequest::GetAttestationEvidence(r) => {
@@ -199,6 +200,58 @@ mod tests {
             }
             other => panic!("expected capabilities, got {other:?}"),
         }
+    }
+
+    // Break caught: omitting the dispatcher route would return Unsupported
+    // instead of the supervisor's atomic capacity inventory.
+    #[tokio::test]
+    async fn capacity_snapshot_comes_from_the_workspace_manager() {
+        let d = test_dispatcher().await;
+        let response = d
+            .dispatch(SupervisorRequest::CapacitySnapshot(
+                ne_protocol::supervisor::CapacitySnapshotRequest {},
+            ))
+            .await;
+        match response {
+            SupervisorResponse::CapacitySnapshot(capacity) => {
+                assert_eq!(capacity.configured_workspace_ceiling, 1024);
+                assert_eq!(capacity.registered_workspaces, 0);
+                assert_eq!(capacity.revision, 0);
+            }
+            other => panic!("expected capacity snapshot, got {other:?}"),
+        }
+    }
+
+    // Break caught: an accepted IPC connection could start a new mutating
+    // request after shutdown had begun.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn closed_lifecycle_rejects_new_mutating_dispatch() {
+        use ne_protocol::supervisor::CreateWorkspaceRequest;
+
+        let dispatcher = test_dispatcher().await;
+        dispatcher.workspaces.close_lifecycle();
+        let response = dispatcher
+            .dispatch(SupervisorRequest::CreateWorkspace(CreateWorkspaceRequest {
+                workspace_id: "closed".to_string(),
+                kernel_sha256: "11".repeat(32),
+                rootfs_sha256: "22".repeat(32),
+                rootfs_read_only: true,
+                vcpu_count: 1,
+                mem_size_mib: 128,
+                guest_vsock_cid: 3,
+                kernel_boot_args: None,
+                network: None,
+                tier: None,
+            }))
+            .await;
+        assert!(matches!(
+            response,
+            SupervisorResponse::Error {
+                kind: SupervisorErrorKind::Internal,
+                ref message,
+            } if message == "supervisor is shutting down"
+        ));
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -81,9 +81,11 @@ impl SupervisorSealer {
         api_key: Option<String>,
         dev_mode: bool,
     ) -> Result<Option<ControlPlaneKeyReleaseClient>, SealError> {
-        match (endpoint, ca_cert, client_cert, client_key, api_key) {
-            (None, None, None, None, None) => Ok(None),
-            (Some(endpoint), Some(ca_cert), Some(client_cert), Some(client_key), api_key) => {
+        let Some(endpoint) = endpoint else {
+            return Ok(None);
+        };
+        match (ca_cert, client_cert, client_key, api_key) {
+            (Some(ca_cert), Some(client_cert), Some(client_key), api_key) => {
                 ControlPlaneKeyReleaseClient::new_mtls(
                     endpoint,
                     api_key,
@@ -97,7 +99,7 @@ impl SupervisorSealer {
                 .map(Some)
                 .map_err(SealError::from)
             }
-            (Some(endpoint), None, None, None, Some(api_key)) if dev_mode => {
+            (None, None, None, Some(api_key)) if dev_mode => {
                 ControlPlaneKeyReleaseClient::new_development(
                     endpoint,
                     api_key,
@@ -294,6 +296,18 @@ mod tests {
             SupervisorSealer::cp_client_from_values(None, None, None, None, None, false)
                 .expect("no configuration is allowed")
                 .is_none()
+        );
+        assert!(
+            SupervisorSealer::cp_client_from_values(
+                None,
+                tls_path(),
+                tls_path(),
+                tls_path(),
+                None,
+                false,
+            )
+            .expect("shared TLS without a key-release endpoint disables only key release")
+            .is_none()
         );
         assert!(
             SupervisorSealer::cp_client_from_values(

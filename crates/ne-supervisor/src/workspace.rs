@@ -11,10 +11,12 @@
 //! `Unsupported` — that's what keeps the dev loop on a Mac quiet while
 //! the Linux integration lands.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use ne_protocol::supervisor::{
     CreateWorkspaceRequest, ExposePortRequest, ForkRequest, ReadFileRequest, RestoreRequest,
     RunCommandRequest, SnapshotRequest, SupervisorErrorKind, SupervisorResponse, TerminateRequest,
@@ -22,6 +24,11 @@ use ne_protocol::supervisor::{
 };
 
 use crate::audit::AuditLog;
+use crate::capacity::CapacityLedger;
+#[cfg(target_os = "linux")]
+use crate::capacity::{
+    RegisteredWorkspaceCapacityGuard, WorkspaceCapacityReservation, capacity_dimensions,
+};
 #[cfg(target_os = "linux")]
 use crate::image::{ImageDigest, ImageError, ImageKind, ImageStore};
 
@@ -91,7 +98,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 #[cfg(target_os = "linux")]
-use crate::network::NetworkController;
+use crate::network::{NetworkController, NetworkSlot};
 
 /// Which execution backend a workspace lands on.
 #[derive(Debug)]
@@ -102,11 +109,275 @@ pub enum WorkspaceExec {
     /// Boxed (as is `OpenShell`): the payloads are hundreds of bytes (clippy
     /// `large_enum_variant`), and each registry entry is created once and
     /// then only looked up by reference.
-    Firecracker(Box<crate::firecracker::Instance>),
+    Firecracker(Box<FirecrackerWorkspace>),
     /// Confidential tier (B): an OpenShell sandbox runs directly in the
     /// attested CVM. Only present under `feature = "confidential-cvm"`.
     #[cfg(feature = "confidential-cvm")]
     OpenShell(Box<ConfidentialWorkspace>),
+}
+
+/// A registered Firecracker instance and the capacity entry it owns.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct FirecrackerWorkspace {
+    instance: Box<crate::firecracker::Instance>,
+    capacity_guard: RegisteredWorkspaceCapacityGuard,
+}
+
+/// A launched Firecracker and its registered capacity entry while it waits
+/// for the registry mutex. Dropping this owner keeps accounting with the VM
+/// until asynchronous teardown has completed.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PendingFirecracker {
+    instance: Option<crate::firecracker::Instance>,
+    capacity_owner: Option<PendingCapacityOwner>,
+    lifecycle_tasks: Arc<LifecycleTasks>,
+    network_cleanup: Option<PendingNetworkCleanup>,
+}
+
+/// Capacity ownership follows a launched instance from admission through the
+/// final registry handoff. A failed promotion remains Reserved until teardown.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+enum PendingCapacityOwner {
+    Reserved(WorkspaceCapacityReservation),
+    Registered(RegisteredWorkspaceCapacityGuard),
+}
+
+#[cfg(target_os = "linux")]
+impl PendingCapacityOwner {
+    fn fail_closed(&self) {
+        match self {
+            Self::Reserved(reservation) => reservation.fail_closed(),
+            Self::Registered(guard) => guard.fail_closed(),
+        }
+    }
+}
+
+/// Only the pending-owner handoff needs this cleanup hook: registered
+/// instances already use the normal terminate path. Keeping it here prevents
+/// a broad networking lifecycle abstraction.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+enum PendingNetworkCleanup {
+    Controller {
+        controller: NetworkController,
+        slot: NetworkSlot,
+    },
+    #[cfg(test)]
+    Probe(PendingNetworkCleanupProbe),
+}
+
+#[cfg(all(target_os = "linux", test))]
+#[derive(Debug)]
+struct PendingNetworkCleanupProbe {
+    completed: Arc<std::sync::atomic::AtomicUsize>,
+    pid: u32,
+    jailer_root: PathBuf,
+    ledger: Arc<CapacityLedger>,
+}
+
+#[cfg(target_os = "linux")]
+impl PendingNetworkCleanup {
+    async fn teardown(self) {
+        match self {
+            Self::Controller { controller, slot } => {
+                if let Err(error) = controller.teardown(slot).await {
+                    warn!(%error, "pending workspace network teardown failed");
+                }
+            }
+            #[cfg(test)]
+            Self::Probe(probe) => {
+                let exited = matches!(
+                    nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(i32::try_from(probe.pid).expect("test pid")),
+                        None,
+                    ),
+                    Err(nix::errno::Errno::ESRCH)
+                );
+                let registered = probe
+                    .ledger
+                    .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
+                    .map(|snapshot| snapshot.registered_workspaces == 1)
+                    .unwrap_or(false);
+                assert!(exited && !probe.jailer_root.exists() && registered);
+                probe
+                    .completed
+                    .store(1, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl PendingFirecracker {
+    fn reserved(
+        instance: crate::firecracker::Instance,
+        capacity_reservation: WorkspaceCapacityReservation,
+        lifecycle_tasks: Arc<LifecycleTasks>,
+        network_cleanup: Option<PendingNetworkCleanup>,
+    ) -> Self {
+        Self {
+            instance: Some(instance),
+            capacity_owner: Some(PendingCapacityOwner::Reserved(capacity_reservation)),
+            lifecycle_tasks,
+            network_cleanup,
+        }
+    }
+
+    fn registered(
+        instance: crate::firecracker::Instance,
+        capacity_guard: RegisteredWorkspaceCapacityGuard,
+        lifecycle_tasks: Arc<LifecycleTasks>,
+        network_cleanup: Option<PendingNetworkCleanup>,
+    ) -> Self {
+        Self {
+            instance: Some(instance),
+            capacity_owner: Some(PendingCapacityOwner::Registered(capacity_guard)),
+            lifecycle_tasks,
+            network_cleanup,
+        }
+    }
+
+    fn register(&mut self, state: WorkspaceState) -> Result<(), crate::capacity::CapacityError> {
+        let Some(owner) = self.capacity_owner.take() else {
+            return Err(crate::capacity::CapacityError::MissingEntry);
+        };
+        match owner {
+            PendingCapacityOwner::Registered(guard) => {
+                self.capacity_owner = Some(PendingCapacityOwner::Registered(guard));
+                Ok(())
+            }
+            PendingCapacityOwner::Reserved(mut reservation) => {
+                match reservation.register_in_place(state) {
+                    Ok(guard) => {
+                        self.capacity_owner = Some(PendingCapacityOwner::Registered(guard));
+                        Ok(())
+                    }
+                    Err(error) => {
+                        self.capacity_owner = Some(PendingCapacityOwner::Reserved(reservation));
+                        Err(error)
+                    }
+                }
+            }
+        }
+    }
+
+    fn instance(&self) -> Option<&crate::firecracker::Instance> {
+        self.instance.as_ref()
+    }
+
+    fn into_workspace(mut self) -> Option<WorkspaceExec> {
+        let instance = self.instance.take()?;
+        let PendingCapacityOwner::Registered(capacity_guard) = self.capacity_owner.take()? else {
+            return None;
+        };
+        Some(WorkspaceExec::Firecracker(Box::new(FirecrackerWorkspace {
+            instance: Box::new(instance),
+            capacity_guard,
+        })))
+    }
+
+    async fn teardown(mut self) {
+        let Some(instance) = self.instance.take() else {
+            return;
+        };
+        let owner = self.capacity_owner.take();
+        let network_cleanup = self.network_cleanup.take();
+        match crate::firecracker::terminate(instance, Duration::from_secs(5)).await {
+            Ok(()) => {
+                if let Some(network_cleanup) = network_cleanup {
+                    network_cleanup.teardown().await;
+                }
+                drop(owner);
+            }
+            Err(error) => {
+                if let Some(owner) = &owner {
+                    owner.fail_closed();
+                }
+                std::mem::forget((error, owner, network_cleanup));
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PendingFirecracker {
+    fn drop(&mut self) {
+        let Some(instance) = self.instance.take() else {
+            return;
+        };
+        let Some(owner) = self.capacity_owner.take() else {
+            return;
+        };
+        let tasks = Arc::clone(&self.lifecycle_tasks);
+        let network_cleanup = self.network_cleanup.take();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            match tasks.begin_cleanup() {
+                Ok(permit) => LifecycleTasks::spawn_started_cleanup(permit, handle, async move {
+                    match crate::firecracker::terminate(instance, Duration::from_secs(5)).await {
+                        Ok(()) => {
+                            if let Some(network_cleanup) = network_cleanup {
+                                network_cleanup.teardown().await;
+                            }
+                            drop(owner);
+                        }
+                        Err(error) => {
+                            owner.fail_closed();
+                            std::mem::forget((error, owner, network_cleanup));
+                        }
+                    }
+                }),
+                Err(_) => std::mem::forget((instance, owner, network_cleanup)),
+            }
+        } else {
+            // This rare internal fallback performs the same ordered teardown
+            // synchronously. If a runtime cannot be built, retaining these
+            // owners fails closed instead of publishing freed capacity early.
+            let Ok(permit) = tasks.begin(true) else {
+                std::mem::forget((instance, owner, network_cleanup));
+                return;
+            };
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(async move {
+                    let _permit = permit;
+                    match crate::firecracker::terminate(instance, Duration::from_secs(5)).await {
+                        Ok(()) => {
+                            if let Some(network_cleanup) = network_cleanup {
+                                network_cleanup.teardown().await;
+                            }
+                            drop(owner);
+                        }
+                        Err(error) => {
+                            owner.fail_closed();
+                            std::mem::forget((error, owner, network_cleanup));
+                        }
+                    }
+                }),
+                Err(_) => std::mem::forget((instance, owner, network_cleanup, permit)),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::ops::Deref for FirecrackerWorkspace {
+    type Target = crate::firecracker::Instance;
+
+    fn deref(&self) -> &Self::Target {
+        &self.instance
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::ops::DerefMut for FirecrackerWorkspace {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.instance
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -127,6 +398,8 @@ pub struct ConfidentialWorkspace {
     pub sandbox: Box<crate::openshell::Sandbox>,
     /// Held for the entire creating-or-active workspace lifetime.
     _capacity_permit: tokio::sync::OwnedSemaphorePermit,
+    /// Public capacity entry owned alongside the confidential slot permit.
+    _capacity_guard: RegisteredWorkspaceCapacityGuard,
 }
 
 #[cfg(feature = "confidential-cvm")]
@@ -203,6 +476,19 @@ pub(crate) fn derive_max_workspaces(host_ram_mib: u64) -> usize {
     const NOMINAL_VM_MIB: u64 = 512;
     let n = (host_ram_mib / NOMINAL_VM_MIB).clamp(1, 1024);
     n as usize
+}
+
+/// Validate the resolved workspace ceiling at every manager construction
+/// boundary, including embedding callers that do not enter `serve()`.
+pub(crate) fn validate_workspace_ceiling(value: usize) -> anyhow::Result<u32> {
+    let ceiling = u32::try_from(value).context("workspace ceiling does not fit the fleet wire")?;
+    if ceiling == 0 {
+        anyhow::bail!("resolved workspace ceiling must be greater than zero");
+    }
+    if ceiling > ne_protocol::fleet::MAX_RUNNER_WORKSPACES {
+        anyhow::bail!("resolved workspace ceiling exceeds the fleet wire maximum");
+    }
+    Ok(ceiling)
 }
 
 /// Per-runtime configuration that doesn't come from the request — host
@@ -283,15 +569,18 @@ pub struct WorkspaceManager {
     cfg: WorkspaceManagerConfig,
     #[allow(dead_code)]
     audit: AuditLog,
-    /// Admission ceiling on concurrent registered workspaces.
-    /// Resolved (0=auto already applied) at the arg→config→manager
-    /// boundary in `serve()`.
+    /// Validated admission ceiling shared with the public fleet inventory.
+    /// `serve()` resolves `0 = auto`; all constructors validate the result.
     #[allow(dead_code)]
-    max_workspaces: usize,
+    max_workspaces: u32,
     /// Admission ceiling on a single workspace's `mem_size_mib`.
     /// Resolved the same way as `max_workspaces`.
     #[allow(dead_code)]
     max_workspace_mem_mib: u32,
+    /// Sole authoritative capacity inventory for this supervisor.
+    capacity: Arc<CapacityLedger>,
+    /// Tracks accepted lifecycle work independently from IPC request waiters.
+    lifecycle_tasks: Arc<LifecycleTasks>,
     #[cfg(target_os = "linux")]
     instances: Mutex<HashMap<String, WorkspaceExec>>,
     #[cfg(target_os = "linux")]
@@ -317,6 +606,11 @@ pub struct WorkspaceManager {
     /// concurrent terminate removes the registry entry.
     #[cfg(target_os = "linux")]
     lifecycle_claims: LifecycleClaims,
+    /// Test-only deterministic boundary after snapshot ownership is marked and
+    /// before the unlocked Firecracker work starts.
+    #[cfg(all(target_os = "linux", test))]
+    snapshot_after_mark_gate:
+        std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// Hard one-slot ceiling for the confidential profile. The owned permit
     /// lives inside the registered OpenShell workspace.
     #[cfg(all(target_os = "linux", feature = "confidential-cvm"))]
@@ -328,6 +622,428 @@ impl WorkspaceManager {
     #[must_use]
     pub fn execution_profile(&self) -> ne_protocol::profile::ExecutionProfile {
         self.cfg.execution_profile
+    }
+
+    /// Return one internally consistent runtime capacity snapshot.
+    pub fn capacity_snapshot(&self) -> SupervisorResponse {
+        match self.capacity.snapshot(self.execution_profile()) {
+            Ok(capacity) => SupervisorResponse::CapacitySnapshot(capacity),
+            Err(error) => SupervisorResponse::Error {
+                kind: SupervisorErrorKind::Internal,
+                message: format!("capacity snapshot failed: {error}"),
+            },
+        }
+    }
+
+    #[allow(dead_code)] // test-only access to the shutdown tracker
+    pub(crate) fn lifecycle_tasks(&self) -> Arc<LifecycleTasks> {
+        Arc::clone(&self.lifecycle_tasks)
+    }
+
+    /// Detach an accepted lifecycle operation from its response waiter.
+    ///
+    /// This is deliberately owned by the manager rather than Dispatcher so
+    /// in-process callers get the same cancellation and shutdown contract.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) async fn run_tracked_lifecycle<F>(
+        self: &Arc<Self>,
+        operation: F,
+    ) -> SupervisorResponse
+    where
+        F: Future<Output = SupervisorResponse> + Send + 'static,
+    {
+        match self.lifecycle_tasks.spawn_operation(operation) {
+            Ok(handle) => match handle.await {
+                Ok(response) => response,
+                Err(error) => SupervisorResponse::Error {
+                    kind: SupervisorErrorKind::Internal,
+                    message: format!("tracked lifecycle task failed: {error}"),
+                },
+            },
+            Err(LifecycleTaskError::Closed) => SupervisorResponse::Error {
+                kind: SupervisorErrorKind::Internal,
+                message: "supervisor is shutting down".to_string(),
+            },
+            Err(error) => SupervisorResponse::Error {
+                kind: SupervisorErrorKind::Internal,
+                message: format!("supervisor lifecycle tracker is unavailable: {error:?}"),
+            },
+        }
+    }
+
+    /// Reject new client lifecycle work and wake the refill loop.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn close_lifecycle(&self) {
+        self.lifecycle_tasks.close();
+        #[cfg(target_os = "linux")]
+        self.kick_refill();
+    }
+
+    /// Wait for accepted lifecycle work before draining idle warm-pool members.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) async fn shutdown_lifecycle(&self) {
+        self.close_lifecycle();
+        self.lifecycle_tasks.wait().await;
+        #[cfg(target_os = "linux")]
+        self.shutdown_pool().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reserve_workspace_capacity(
+        &self,
+        workspace_id: &str,
+        vcpu_count: u8,
+        mem_size_mib: u32,
+    ) -> Result<WorkspaceCapacityReservation, SupervisorResponse> {
+        let (cpu_millicores, memory_bytes) =
+            capacity_dimensions(u64::from(vcpu_count), u64::from(mem_size_mib))
+                .map_err(|error| capacity_error_response(&error.to_string()))?;
+        self.capacity
+            .reserve_workspace(workspace_id, cpu_millicores, memory_bytes)
+            .map_err(|error| match error {
+                crate::capacity::CapacityError::Exhausted => SupervisorResponse::Error {
+                    kind: SupervisorErrorKind::CapacityExceeded,
+                    message: "workspace capacity is exhausted".to_string(),
+                },
+                _ => capacity_error_response(&error.to_string()),
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn register_instance_capacity(
+        &self,
+        instance: &crate::firecracker::Instance,
+    ) -> Result<RegisteredWorkspaceCapacityGuard, SupervisorResponse> {
+        self.reserve_workspace_capacity(
+            &instance.workspace_id,
+            instance.vcpu_count,
+            instance.mem_size_mib,
+        )
+        .and_then(|reservation| {
+            reservation
+                .register(instance.lifecycle_state)
+                .map_err(|error| capacity_error_response(&error.to_string()))
+        })
+    }
+
+    /// An unregistered launch may have escaped every normal lifecycle owner.
+    /// Retain the owning termination error and fault inventory before its
+    /// reservation can drop, because the child may still be live.
+    #[cfg(target_os = "linux")]
+    async fn terminate_unregistered_or_fault(
+        &self,
+        instance: crate::firecracker::Instance,
+    ) -> Result<(), ()> {
+        match crate::firecracker::terminate(instance, Duration::from_secs(5)).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.capacity.fail_closed();
+                std::mem::forget(error);
+                Err(())
+            }
+        }
+    }
+
+    /// Reserve verified dimensions before awaiting a net-new boot. The
+    /// reservation is returned only with a successful boot; all error and
+    /// cancellation paths drop it through RAII.
+    #[cfg(target_os = "linux")]
+    async fn boot_with_reserved_capacity<T, F>(
+        &self,
+        workspace_id: &str,
+        vcpu_count: u8,
+        mem_size_mib: u32,
+        boot: F,
+    ) -> Result<(T, WorkspaceCapacityReservation), SupervisorResponse>
+    where
+        F: Future<Output = Result<T, SupervisorResponse>>,
+    {
+        let reservation =
+            self.reserve_workspace_capacity(workspace_id, vcpu_count, mem_size_mib)?;
+        let output = boot.await?;
+        Ok((output, reservation))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn capacity_error_response(message: &str) -> SupervisorResponse {
+    SupervisorResponse::Error {
+        kind: SupervisorErrorKind::Internal,
+        message: format!("capacity accounting failed: {message}"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+const UNCONFIRMED_TERMINATION_MESSAGE: &str =
+    "workspace termination could not confirm process exit";
+
+/// Supervisor-owned task accounting for operations that can hold lifecycle
+/// state or capacity. A detached IPC waiter does not cancel its tracked task.
+#[derive(Debug)]
+pub(crate) struct LifecycleTasks {
+    state: std::sync::Mutex<LifecycleTaskState>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Debug)]
+struct LifecycleTaskState {
+    accepting: bool,
+    active: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleTaskError {
+    Closed,
+    Poisoned,
+    NoRuntime,
+}
+
+#[derive(Debug)]
+pub(crate) struct LifecycleTaskPermit {
+    tasks: Arc<LifecycleTasks>,
+}
+
+impl LifecycleTasks {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(LifecycleTaskState {
+                accepting: true,
+                active: 0,
+            }),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Stop new client operations. Already accepted work keeps its permit and
+    /// may still create cleanup work before [`Self::wait`] returns.
+    pub(crate) fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.accepting = false;
+        }
+        self.changed.notify_waiters();
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.state.lock().map_or(true, |state| !state.accepting)
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn spawn_operation<F, T>(
+        self: &Arc<Self>,
+        future: F,
+    ) -> Result<tokio::task::JoinHandle<T>, LifecycleTaskError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let permit = self.begin(false)?;
+        let handle =
+            tokio::runtime::Handle::try_current().map_err(|_| LifecycleTaskError::NoRuntime)?;
+        Ok(handle.spawn(async move {
+            let _permit = permit;
+            future.await
+        }))
+    }
+
+    /// Spawn cleanup owned by an operation that is already tracked. Cleanup
+    /// remains accepted after close while at least its parent permit exists.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn spawn_cleanup<F>(self: &Arc<Self>, future: F) -> Result<(), LifecycleTaskError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let handle =
+            tokio::runtime::Handle::try_current().map_err(|_| LifecycleTaskError::NoRuntime)?;
+        let permit = self.begin_cleanup()?;
+        Self::spawn_started_cleanup(permit, handle, future);
+        Ok(())
+    }
+
+    pub(crate) fn begin_cleanup(
+        self: &Arc<Self>,
+    ) -> Result<LifecycleTaskPermit, LifecycleTaskError> {
+        self.begin(true)
+    }
+
+    pub(crate) fn spawn_started_cleanup<F>(
+        permit: LifecycleTaskPermit,
+        handle: tokio::runtime::Handle,
+        future: F,
+    ) where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        handle.spawn(async move {
+            let _permit = permit;
+            future.await;
+        });
+    }
+
+    /// Wait for all accepted operation and cleanup permits to finish.
+    pub(crate) async fn wait(&self) {
+        loop {
+            let notified = self.changed.notified();
+            let active = match self.state.lock() {
+                Ok(state) => state.active,
+                Err(_) => return,
+            };
+            if active == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn begin(self: &Arc<Self>, cleanup: bool) -> Result<LifecycleTaskPermit, LifecycleTaskError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LifecycleTaskError::Poisoned)?;
+        if !state.accepting && (!cleanup || state.active == 0) {
+            return Err(LifecycleTaskError::Closed);
+        }
+        state.active = state
+            .active
+            .checked_add(1)
+            .ok_or(LifecycleTaskError::Poisoned)?;
+        Ok(LifecycleTaskPermit {
+            tasks: Arc::clone(self),
+        })
+    }
+}
+
+impl Drop for LifecycleTaskPermit {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.tasks.state.lock()
+            && let Some(active) = state.active.checked_sub(1)
+        {
+            state.active = active;
+            self.tasks.changed.notify_waiters();
+        }
+    }
+}
+
+/// A verified snapshot restore launch that has not spawned a VM yet.
+///
+/// Separating verification from launch lets every net-new path reserve exact
+/// signed dimensions before it can create a Firecracker process.
+#[cfg(target_os = "linux")]
+struct PreparedSnapshotRestore {
+    manifest: ne_protocol::snapshot::SnapshotManifest,
+    restore_cfg: crate::firecracker::RestoreLaunchConfig,
+}
+
+#[cfg(test)]
+mod capacity_dimension_tests {
+    use crate::capacity::capacity_dimensions;
+
+    #[test]
+    fn capacity_dimensions_convert_signed_workspace_values() {
+        assert_eq!(
+            capacity_dimensions(2, 256).expect("dimensions"),
+            (2_000, 268_435_456)
+        );
+    }
+
+    #[test]
+    fn capacity_dimensions_reject_overflow_before_reservation() {
+        assert!(capacity_dimensions(u64::MAX, u64::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_task_tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+
+    use super::LifecycleTasks;
+    use crate::capacity::CapacityLedger;
+    use ne_protocol::profile::ExecutionProfile;
+    use ne_protocol::supervisor::WorkspaceState;
+
+    // Break caught: dropping an IPC waiter used to cancel snapshot finalize
+    // work, leaving its lifecycle state stuck at Snapshotting.
+    #[tokio::test]
+    async fn dropped_waiter_detaches_snapshot_finalize_until_tracker_drains() {
+        let tasks = Arc::new(LifecycleTasks::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let ledger = Arc::new(CapacityLedger::new(1));
+        let guard = ledger
+            .reserve_workspace("snapshot", 1_000, 1_024)
+            .expect("reservation")
+            .register(WorkspaceState::Running)
+            .expect("registration");
+        let finished_guard = Arc::new(Mutex::new(None));
+        let started_wait = started.notified();
+        let outer_tasks = Arc::clone(&tasks);
+        let outer_started = Arc::clone(&started);
+        let outer_release = Arc::clone(&release);
+        let outer_finished_guard = Arc::clone(&finished_guard);
+        let outer = tokio::spawn(async move {
+            let operation = outer_tasks
+                .spawn_operation(async move {
+                    let mut guard = guard;
+                    guard
+                        .set_state(WorkspaceState::Snapshotting)
+                        .expect("snapshot state");
+                    outer_started.notify_one();
+                    outer_release.notified().await;
+                    guard
+                        .set_state(WorkspaceState::Running)
+                        .expect("finalize running state");
+                    *outer_finished_guard.lock().expect("test lock") = Some(guard);
+                })
+                .expect("tracker accepts operation");
+            let _ = operation.await;
+        });
+        started_wait.await;
+        outer.abort();
+        let _ = outer.await;
+
+        tasks.close();
+        release.notify_one();
+        tasks.wait().await;
+        let snapshot = ledger
+            .snapshot(ExecutionProfile::Standard)
+            .expect("final snapshot");
+        assert_eq!(snapshot.registered_workspaces, 1);
+        assert_eq!(snapshot.runnable_workspaces, 1);
+        drop(finished_guard.lock().expect("test lock").take());
+    }
+
+    // Break caught: closing could race a nested cleanup spawn and let wait
+    // return while that cleanup still owned a resource.
+    #[tokio::test]
+    async fn close_rejects_new_operations_but_waits_for_accepted_cleanup() {
+        let tasks = Arc::new(LifecycleTasks::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let permit_cleanup = Arc::new(tokio::sync::Notify::new());
+        let cleanup_finished = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let started_wait = started.notified();
+        let operation_tasks = Arc::clone(&tasks);
+        let operation_started = Arc::clone(&started);
+        let operation_permit = Arc::clone(&permit_cleanup);
+        let operation_finished = Arc::clone(&cleanup_finished);
+        tasks
+            .spawn_operation(async move {
+                operation_started.notify_one();
+                operation_permit.notified().await;
+                operation_tasks
+                    .spawn_cleanup(async move {
+                        operation_finished.store(1, Ordering::Release);
+                    })
+                    .expect("accepted operation may create cleanup after close");
+            })
+            .expect("initial operation");
+        started_wait.await;
+        tasks.close();
+        assert!(tasks.spawn_operation(async {}).is_err());
+        permit_cleanup.notify_one();
+        tasks.wait().await;
+        assert_eq!(cleanup_finished.load(Ordering::Acquire), 1);
     }
 }
 
@@ -527,6 +1243,35 @@ mod measurement_tests {
             assert!(!artifact_published, "live={live}");
         }
     }
+
+    #[cfg(feature = "confidential-cvm")]
+    #[test]
+    fn confidential_slot_and_ledger_entry_release_together() {
+        use std::sync::Arc;
+
+        use crate::capacity::CapacityLedger;
+        use ne_protocol::profile::ExecutionProfile;
+        use ne_protocol::supervisor::WorkspaceState;
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = super::try_acquire_confidential_capacity(&semaphore).expect("slot permit");
+        let ledger = CapacityLedger::new(1);
+        let guard = ledger
+            .reserve_workspace("confidential", 0, 0)
+            .expect("ledger reservation")
+            .register(WorkspaceState::Running)
+            .expect("ledger registration");
+        drop(guard);
+        drop(permit);
+        assert!(super::try_acquire_confidential_capacity(&semaphore).is_ok());
+        assert_eq!(
+            ledger
+                .snapshot(ExecutionProfile::ConfidentialAzure)
+                .expect("released ledger snapshot")
+                .registered_workspaces,
+            0
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -566,11 +1311,14 @@ impl WorkspaceManager {
         max_workspaces: usize,
         max_workspace_mem_mib: u32,
     ) -> anyhow::Result<Self> {
+        let max_workspaces = validate_workspace_ceiling(max_workspaces)?;
         Ok(Self {
             cfg,
             audit,
             max_workspaces,
             max_workspace_mem_mib,
+            capacity: Arc::new(CapacityLedger::new(max_workspaces)),
+            lifecycle_tasks: Arc::new(LifecycleTasks::new()),
         })
     }
 
@@ -735,12 +1483,17 @@ impl WorkspaceManager {
         max_workspaces: usize,
         max_workspace_mem_mib: u32,
     ) -> anyhow::Result<Self> {
+        let max_workspaces = validate_workspace_ceiling(max_workspaces)?;
+        let lifecycle_tasks = Arc::new(LifecycleTasks::new());
         let (pool, refill_tx, refill_rx) = cfg.warm_pool.as_ref().map_or_else(
             || (None, None, Mutex::new(None)),
             |wp| {
                 let (tx, rx) = mpsc::channel(8);
                 (
-                    Some(Arc::new(crate::pool::WarmPool::new(wp.clone()))),
+                    Some(Arc::new(crate::pool::WarmPool::with_lifecycle(
+                        wp.clone(),
+                        Arc::clone(&lifecycle_tasks),
+                    ))),
                     Some(tx),
                     Mutex::new(Some(rx)),
                 )
@@ -751,6 +1504,8 @@ impl WorkspaceManager {
             audit,
             max_workspaces,
             max_workspace_mem_mib,
+            capacity: Arc::new(CapacityLedger::new(max_workspaces)),
+            lifecycle_tasks,
             instances: Mutex::new(HashMap::new()),
             pool,
             refill_tx,
@@ -759,6 +1514,8 @@ impl WorkspaceManager {
             attestation,
             attestation_nonces: Mutex::new(HashMap::new()),
             lifecycle_claims: LifecycleClaims::default(),
+            #[cfg(test)]
+            snapshot_after_mark_gate: std::sync::Mutex::new(None),
             #[cfg(feature = "confidential-cvm")]
             confidential_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
         })
@@ -770,6 +1527,17 @@ impl WorkspaceManager {
     #[must_use]
     pub fn ingress_registry(&self) -> Arc<ne_ingress::IngressRegistry> {
         Arc::clone(&self.ingress)
+    }
+
+    #[cfg(test)]
+    fn set_snapshot_after_mark_gate(
+        &self,
+        marked: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) {
+        if let Ok(mut gate) = self.snapshot_after_mark_gate.lock() {
+            *gate = Some((marked, release));
+        }
     }
 
     async fn workspace_control(
@@ -793,32 +1561,15 @@ impl WorkspaceManager {
         }
     }
 
-    /// Total live Firecracker VMs this manager is responsible for: registered
-    /// `instances` PLUS warm-pool members (idle ready members and in-flight
-    /// provisions — both are real, memory-consuming FC processes even though
-    /// they are not in `instances` yet). This is the figure the
-    /// `max_workspaces` exhaustion backstop bounds: counting only
-    /// `instances` would let a configured pool run the host `target_size` VMs
-    /// past the ceiling.
-    ///
-    /// Locking: the `instances` lock and the pool's members lock are taken
-    /// sequentially (acquire, read, release; then the other), never nested —
-    /// the reading is therefore a snapshot, which is fine for a soft ceiling.
-    async fn live_vm_count(&self) -> usize {
-        let registered = self.instances.lock().await.len();
-        let pooled = match &self.pool {
-            Some(pool) => {
-                let (available, in_flight) = pool.counts().await;
-                available + in_flight
-            }
-            None => 0,
-        };
-        registered + pooled
-    }
-
     /// Launch a new workspace under the selected execution profile and
     /// register it under the caller-supplied `workspace_id`.
-    pub async fn create(&self, req: CreateWorkspaceRequest) -> SupervisorResponse {
+    pub async fn create(self: &Arc<Self>, req: CreateWorkspaceRequest) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.create_inner(req).await })
+            .await
+    }
+
+    async fn create_inner(&self, req: CreateWorkspaceRequest) -> SupervisorResponse {
         let confidential = matches!(
             self.cfg.execution_profile,
             ne_protocol::profile::ExecutionProfile::ConfidentialAzure
@@ -878,32 +1629,13 @@ impl WorkspaceManager {
             };
         }
 
-        // Warm-pool dispatch runs BEFORE the net-new count ceiling below,
-        // deliberately: a pool HIT is count-neutral — the VM moves from the
-        // pool tally into `instances`, leaving `live_vm_count` unchanged — so
-        // gating adoption on the combined ceiling would starve a full pool
-        // sized near `max_workspaces`, rejecting every tier create even though
-        // adoption adds no VM. `create_from_pool` applies the ceiling itself,
-        // only on its net-new miss/fork-fallback branch.
+        // Warm-pool dispatch runs first because a hit transfers an existing
+        // ready-pool ledger guard into the registry without a new reservation.
+        // A miss obtains its own ledger reservation before it can boot.
         if req.tier.is_some() {
             return self.create_from_pool(req).await;
         }
 
-        // Soft ceiling on the COMBINED live-VM count (registered instances +
-        // warm-pool members, see `live_vm_count`), gating only NET-NEW boots:
-        // the Firecracker cold boot that follows (count-neutral warm-pool
-        // adoption is handled above / inside `create_from_pool`). This
-        // check-then-act races the eventual insert into `instances` (done
-        // later, under separate lock acquisitions, by
-        // `register_or_teardown`), so a burst of concurrent creates can admit
-        // a few requests over the line. Acceptable for an exhaustion
-        // backstop — not a hard quota.
-        if self.live_vm_count().await >= self.max_workspaces {
-            return SupervisorResponse::Error {
-                kind: SupervisorErrorKind::CapacityExceeded,
-                message: format!("at workspace capacity ({})", self.max_workspaces),
-            };
-        }
         if both_empty {
             return SupervisorResponse::Error {
                 kind: SupervisorErrorKind::InvalidImageDigest,
@@ -916,6 +1648,18 @@ impl WorkspaceManager {
                 message: "standard creates require vcpu_count >= 1".into(),
             };
         }
+
+        // This reservation is the atomic admission decision. It follows the
+        // launched object until registry removal; every early return below
+        // drops it before any unregistered VM can be reported as inventory.
+        let capacity_reservation = match self.reserve_workspace_capacity(
+            &req.workspace_id,
+            req.vcpu_count,
+            req.mem_size_mib,
+        ) {
+            Ok(reservation) => reservation,
+            Err(response) => return response,
+        };
 
         // Resolve and verify both images before allocating a network slot or
         // creating any workspace/chroot state.
@@ -1027,6 +1771,25 @@ impl WorkspaceManager {
         match crate::firecracker::launch(cfg).await {
             Ok(mut instance) => {
                 instance.network_slot = network_slot;
+                let pending_network_cleanup = instance
+                    .network_slot
+                    .clone()
+                    .zip(self.cfg.network.clone())
+                    .map(|(slot, controller)| PendingNetworkCleanup::Controller {
+                        controller,
+                        slot,
+                    });
+                // From this point the launched child and its reservation are
+                // one cancellation-safe owner, including the audit await.
+                let pending = PendingFirecracker::reserved(
+                    instance,
+                    capacity_reservation,
+                    Arc::clone(&self.lifecycle_tasks),
+                    pending_network_cleanup,
+                );
+                let Some(instance) = pending.instance() else {
+                    return capacity_error_response("launched workspace ownership is incomplete");
+                };
                 let workspace_network =
                     instance.network_slot.as_ref().map(|slot| WorkspaceNetwork {
                         netns_path: format!("/var/run/netns/{}", slot.netns),
@@ -1075,10 +1838,7 @@ impl WorkspaceManager {
                 // down (chroot + netns) on a collision — a bare insert here
                 // let two concurrent same-id creates both leak a live VM.
                 if let Err(resp) = self
-                    .register_or_teardown(
-                        &req.workspace_id,
-                        WorkspaceExec::Firecracker(Box::new(instance)),
-                    )
+                    .register_pending_firecracker(&req.workspace_id, pending)
                     .await
                 {
                     return resp;
@@ -1144,6 +1904,16 @@ impl WorkspaceManager {
                 };
             }
         };
+        let capacity_reservation = match self.capacity.reserve_workspace(&req.workspace_id, 0, 0) {
+            Ok(reservation) => reservation,
+            Err(crate::capacity::CapacityError::Exhausted) => {
+                return SupervisorResponse::Error {
+                    kind: SupervisorErrorKind::CapacityExceeded,
+                    message: "workspace capacity is exhausted".to_string(),
+                };
+            }
+            Err(error) => return capacity_error_response(&error.to_string()),
+        };
 
         // The OpenShell path does not consume the Firecracker-specific request
         // fields (kernel/rootfs/vcpu/mem/vsock cid); the sandbox is configured
@@ -1179,6 +1949,13 @@ impl WorkspaceManager {
 
         match Sandbox::spawn(&cfg).await {
             Ok(sandbox) => {
+                let capacity_guard = match capacity_reservation.register(WorkspaceState::Running) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        sandbox.terminate(Duration::from_secs(5)).await;
+                        return capacity_error_response(&error.to_string());
+                    }
+                };
                 let ssh_addr = sandbox.ssh_addr;
                 let workspace_id = sandbox.workspace_id.clone();
                 let resp = WorkspaceCreated {
@@ -1213,6 +1990,7 @@ impl WorkspaceManager {
                         WorkspaceExec::OpenShell(Box::new(ConfidentialWorkspace {
                             sandbox: Box::new(sandbox),
                             _capacity_permit: permit,
+                            _capacity_guard: capacity_guard,
                         })),
                     )
                     .await
@@ -1283,9 +2061,12 @@ impl WorkspaceManager {
         let base_snapshot_id = pool.config().base_snapshot_id.clone();
 
         // Pop + probe loop: discard any member that died while idle.
-        let mut adopted: Option<crate::firecracker::Instance> = None;
+        let mut adopted: Option<crate::pool::PoolMember> = None;
         while let Some(mut member) = pool.pop().await {
-            let vsock = member.vsock_host_socket.clone();
+            let Some(instance) = member.instance() else {
+                continue;
+            };
+            let vsock = instance.vsock_host_socket.clone();
             match crate::firecracker::wait_for_guest_ready(
                 &vsock,
                 DEFAULT_GUEST_VSOCK_PORT,
@@ -1294,7 +2075,10 @@ impl WorkspaceManager {
             .await
             {
                 Ok(()) => {
-                    member.workspace_id = req.workspace_id.clone();
+                    let Some(instance) = member.instance_mut() else {
+                        continue;
+                    };
+                    instance.workspace_id = req.workspace_id.clone();
                     adopted = Some(member);
                     break;
                 }
@@ -1306,13 +2090,32 @@ impl WorkspaceManager {
                         serde_json::json!({ "reason": "checkout_probe_failed", "error": e.to_string() }),
                     )
                     .await;
-                    let _ = crate::firecracker::terminate(member, Duration::from_secs(5)).await;
+                    member.teardown().await;
                     self.kick_refill();
                 }
             }
         }
 
-        if let Some(instance) = adopted {
+        if let Some(member) = adopted {
+            let mut member = member;
+            let Some((instance, mut ready_guard)) = member.take_parts() else {
+                return capacity_error_response("pooled member ownership is incomplete");
+            };
+            let capacity_guard = match ready_guard
+                .adopt_in_place(&req.workspace_id, WorkspaceState::Running)
+            {
+                Ok(guard) => guard,
+                Err(error) => {
+                    match crate::firecracker::terminate(instance, Duration::from_secs(5)).await {
+                        Ok(()) => drop(ready_guard),
+                        Err(termination) => {
+                            ready_guard.fail_closed();
+                            std::mem::forget((termination, ready_guard));
+                        }
+                    }
+                    return capacity_error_response(&error.to_string());
+                }
+            };
             let resp = WorkspaceCreated {
                 workspace_id: instance.workspace_id.clone(),
                 firecracker_pid: instance.firecracker_pid,
@@ -1323,9 +2126,14 @@ impl WorkspaceManager {
                 control_socket: None,
             };
             if let Err(resp) = self
-                .register_or_teardown(
+                .register_pending_firecracker(
                     &req.workspace_id,
-                    WorkspaceExec::Firecracker(Box::new(instance)),
+                    PendingFirecracker::registered(
+                        instance,
+                        capacity_guard,
+                        Arc::clone(&self.lifecycle_tasks),
+                        None,
+                    ),
                 )
                 .await
             {
@@ -1342,17 +2150,6 @@ impl WorkspaceManager {
             return SupervisorResponse::WorkspaceCreated(resp);
         }
 
-        // Miss: synchronous fork from the tier base. This boots a NET-NEW VM
-        // (unlike the count-neutral hit/adopt path above), so it must honor the
-        // same soft combined-count ceiling the cold-boot path enforces —
-        // otherwise an empty pool at capacity would fork past `max_workspaces`.
-        if self.live_vm_count().await >= self.max_workspaces {
-            return SupervisorResponse::Error {
-                kind: SupervisorErrorKind::CapacityExceeded,
-                message: format!("at workspace capacity ({})", self.max_workspaces),
-            };
-        }
-
         info!(workspace_id = %req.workspace_id, tier = %tier, "warm-pool miss — synchronous fork fallback");
         self.audit_emit(
             EventType::PoolMiss,
@@ -1362,12 +2159,12 @@ impl WorkspaceManager {
         .await;
         self.kick_refill();
 
-        let (instance, _machine_id) = match self
-            .boot_ready_reset(&base_snapshot_id, &req.workspace_id, &req.workspace_id)
+        let prepared = match self
+            .prepare_snapshot_restore(&base_snapshot_id, &req.workspace_id)
             .await
         {
-            Ok(v) => v,
-            Err((kind, message)) => {
+            Ok(prepared) => prepared,
+            Err(SupervisorResponse::Error { kind, message }) => {
                 self.audit_emit(
                     EventType::CommandFailed,
                     Some(req.workspace_id.clone()),
@@ -1377,6 +2174,45 @@ impl WorkspaceManager {
                 .await;
                 return SupervisorResponse::Error { kind, message };
             }
+            Err(_) => {
+                return SupervisorResponse::Error {
+                    kind: SupervisorErrorKind::Internal,
+                    message: "unexpected snapshot preparation response".to_string(),
+                };
+            }
+        };
+        let vcpu_count = prepared.manifest.guest_identity.vcpu_count;
+        let mem_size_mib = prepared.manifest.guest_identity.mem_size_mib;
+        let boot = async {
+            self.boot_prepared_ready_reset(prepared, &req.workspace_id)
+                .await
+                .map_err(|(kind, message)| SupervisorResponse::Error { kind, message })
+        };
+        let ((instance, _machine_id), capacity_reservation) = match self
+            .boot_with_reserved_capacity(&req.workspace_id, vcpu_count, mem_size_mib, boot)
+            .await
+        {
+            Ok(v) => v,
+            Err(SupervisorResponse::Error { kind, message }) => {
+                self.audit_emit(
+                    EventType::CommandFailed,
+                    Some(req.workspace_id.clone()),
+                    serde_json::json!({ "op": "create_from_pool_fallback",
+                                        "error_kind": format!("{kind:?}"), "error": message }),
+                )
+                .await;
+                return SupervisorResponse::Error { kind, message };
+            }
+            Err(response) => return response,
+        };
+        let pending = PendingFirecracker::reserved(
+            instance,
+            capacity_reservation,
+            Arc::clone(&self.lifecycle_tasks),
+            None,
+        );
+        let Some(instance) = pending.instance() else {
+            return capacity_error_response("pooled workspace ownership is incomplete");
         };
         let resp = WorkspaceCreated {
             workspace_id: instance.workspace_id.clone(),
@@ -1389,10 +2225,7 @@ impl WorkspaceManager {
             control_socket: None,
         };
         if let Err(resp) = self
-            .register_or_teardown(
-                &req.workspace_id,
-                WorkspaceExec::Firecracker(Box::new(instance)),
-            )
+            .register_pending_firecracker(&req.workspace_id, pending)
             .await
         {
             return resp;
@@ -1817,7 +2650,13 @@ impl WorkspaceManager {
     }
 
     /// Tear down a registered workspace and reclaim its host resources.
-    pub async fn terminate(&self, req: TerminateRequest) -> SupervisorResponse {
+    pub async fn terminate(self: &Arc<Self>, req: TerminateRequest) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.terminate_inner(req).await })
+            .await
+    }
+
+    async fn terminate_inner(&self, req: TerminateRequest) -> SupervisorResponse {
         let Some(exec) = self.instances.lock().await.remove(&req.workspace_id) else {
             return SupervisorResponse::Error {
                 kind: SupervisorErrorKind::WorkspaceNotFound,
@@ -1838,16 +2677,50 @@ impl WorkspaceManager {
                 (None, Ok(()))
             }
             WorkspaceExec::Firecracker(instance) => {
+                let FirecrackerWorkspace {
+                    instance,
+                    capacity_guard,
+                } = *instance;
                 let slot = instance.network_slot.clone();
-                let r = crate::firecracker::terminate(*instance, grace).await;
+                let r: Result<(), crate::firecracker::TerminateError> =
+                    match crate::firecracker::terminate(*instance, grace).await {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            capacity_guard.fail_closed();
+                            let network = slot.clone().zip(self.cfg.network.clone());
+                            std::mem::forget((error, capacity_guard, network));
+                            return SupervisorResponse::Error {
+                                kind: SupervisorErrorKind::Internal,
+                                message: "workspace termination could not confirm process exit"
+                                    .to_string(),
+                            };
+                        }
+                    };
                 (slot, r)
             }
         };
         #[cfg(not(feature = "confidential-cvm"))]
         let (network_slot, firecracker_result) = match exec {
             WorkspaceExec::Firecracker(instance) => {
+                let FirecrackerWorkspace {
+                    instance,
+                    capacity_guard,
+                } = *instance;
                 let slot = instance.network_slot.clone();
-                let r = crate::firecracker::terminate(*instance, grace).await;
+                let r: Result<(), crate::firecracker::TerminateError> =
+                    match crate::firecracker::terminate(*instance, grace).await {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            capacity_guard.fail_closed();
+                            let network = slot.clone().zip(self.cfg.network.clone());
+                            std::mem::forget((error, capacity_guard, network));
+                            return SupervisorResponse::Error {
+                                kind: SupervisorErrorKind::Internal,
+                                message: "workspace termination could not confirm process exit"
+                                    .to_string(),
+                            };
+                        }
+                    };
                 (slot, r)
             }
         };
@@ -1933,7 +2806,13 @@ impl WorkspaceManager {
     // `command.rs` (`self.workspaces.pause(r).await`) is unchanged and the body
     // re-becomes async when the API is restored.
     #[allow(clippy::unused_async)]
-    pub async fn pause(&self, ws_ref: WorkspaceRef) -> SupervisorResponse {
+    pub async fn pause(self: &Arc<Self>, ws_ref: WorkspaceRef) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.pause_inner(ws_ref).await })
+            .await
+    }
+
+    async fn pause_inner(&self, ws_ref: WorkspaceRef) -> SupervisorResponse {
         let _ = &ws_ref;
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
@@ -1946,7 +2825,13 @@ impl WorkspaceManager {
 
     /// DEFERRED: see [`Self::pause`].
     #[allow(clippy::unused_async)]
-    pub async fn resume(&self, ws_ref: WorkspaceRef) -> SupervisorResponse {
+    pub async fn resume(self: &Arc<Self>, ws_ref: WorkspaceRef) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.resume_inner(ws_ref).await })
+            .await
+    }
+
+    async fn resume_inner(&self, ws_ref: WorkspaceRef) -> SupervisorResponse {
         let _ = &ws_ref;
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
@@ -1970,7 +2855,19 @@ impl WorkspaceManager {
     /// existence re-check (the resurrection guard): if the workspace
     /// was terminated mid-dump it is NOT reinserted. The subsequent copy-out,
     /// hashing, and signing need only the artifact paths and stay unlocked.
-    pub async fn snapshot(&self, req: SnapshotRequest) -> SupervisorResponse {
+    pub async fn snapshot(self: &Arc<Self>, req: SnapshotRequest) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.snapshot_inner(req).await })
+            .await
+    }
+
+    async fn snapshot_inner(&self, req: SnapshotRequest) -> SupervisorResponse {
+        #[cfg(test)]
+        let after_mark_gate = self
+            .snapshot_after_mark_gate
+            .lock()
+            .ok()
+            .and_then(|gate| gate.clone());
         // Claim before looking in the registry. If terminate removes the
         // source after this point, no create/restore/fork can reuse its
         // id-derived socket or chroot until every snapshot return path drops
@@ -2079,6 +2976,12 @@ impl WorkspaceManager {
             // sees "dump in flight". It is resolved back to Running/Paused at
             // finalize — or dropped entirely if the workspace is terminated
             // mid-dump (resurrection guard). It never leaks as a terminal state.
+            if let Err(error) = instance
+                .capacity_guard
+                .set_state(WorkspaceState::Snapshotting)
+            {
+                return capacity_error_response(&error.to_string());
+            }
             instance.lifecycle_state = WorkspaceState::Snapshotting;
 
             // Capture everything we need before dropping the guard — including
@@ -2101,6 +3004,11 @@ impl WorkspaceManager {
                 was_running,
             )
         };
+        #[cfg(test)]
+        if let Some((marked, release)) = after_mark_gate {
+            marked.notify_one();
+            release.notified().await;
+        }
         // Guard dropped — the pause + dump below run UNLOCKED against the
         // captured paths. What can still happen to this workspace meanwhile:
         // only a `terminate` can remove it from the registry (in-place
@@ -2433,7 +3341,7 @@ impl WorkspaceManager {
                   "workspace was terminated and recreated during snapshot; leaving the new boot untouched");
             return false;
         }
-        instance.lifecycle_state = match action {
+        let next_state = match action {
             SnapshotFinalize::Set(state) => state,
             SnapshotFinalize::ResumeInPlace => {
                 match crate::firecracker::resume_at(&instance.api_socket_host).await {
@@ -2448,25 +3356,23 @@ impl WorkspaceManager {
                 }
             }
         };
+        if let Err(error) = instance.capacity_guard.set_state(next_state) {
+            warn!(workspace_id = %workspace_id, error = %error,
+                  "snapshot finalize capacity accounting failed");
+            return false;
+        }
+        instance.lifecycle_state = next_state;
         true
     }
 
-    /// Shared fork/restore boot: verify the artifact (signature + hashes,
-    /// fail-closed), build a `LaunchConfig` from the manifest, and boot a
-    /// fresh jailed Firecracker via `firecracker::restore` (load + resume).
-    /// Returns the live, `UNregistered` instance plus the verified manifest.
-    /// On failure returns the typed error response the caller relays.
-    async fn boot_from_snapshot(
+    /// Verify a snapshot artifact and prepare its restore launch without
+    /// spawning. Net-new callers reserve the signed dimensions after this
+    /// succeeds and before they call [`Self::boot_prepared_snapshot`].
+    async fn prepare_snapshot_restore(
         &self,
         snapshot_id: &str,
         new_workspace_id: &str,
-    ) -> Result<
-        (
-            crate::firecracker::Instance,
-            ne_protocol::snapshot::SnapshotManifest,
-        ),
-        SupervisorResponse,
-    > {
+    ) -> Result<PreparedSnapshotRestore, SupervisorResponse> {
         // S2-F1 (Critical): validate BOTH caller-supplied ids before either is
         // used as a filesystem path component. `snapshot_id` feeds
         // `snapshot_dir(state_dir, ..)` (read path) and `new_workspace_id`
@@ -2550,10 +3456,42 @@ impl WorkspaceManager {
             mem_source: dir.join("mem"),
             vmstate_source: dir.join("vmstate"),
         };
-        crate::firecracker::restore(restore_cfg)
+        Ok(PreparedSnapshotRestore {
+            manifest,
+            restore_cfg,
+        })
+    }
+
+    /// Boot a verified restore launch. Callers that add a resident workspace
+    /// must already own its capacity reservation.
+    async fn boot_prepared_snapshot(
+        &self,
+        prepared: PreparedSnapshotRestore,
+    ) -> Result<crate::firecracker::Instance, SupervisorResponse> {
+        crate::firecracker::restore(prepared.restore_cfg)
             .await
-            .map(|inst| (inst, manifest))
             .map_err(restore_launch_error_response)
+    }
+
+    /// Convenience path for count-neutral restore consumers such as live
+    /// hot-swap. New workspace admission must use prepare/reserve/boot.
+    async fn boot_from_snapshot(
+        &self,
+        snapshot_id: &str,
+        new_workspace_id: &str,
+    ) -> Result<
+        (
+            crate::firecracker::Instance,
+            ne_protocol::snapshot::SnapshotManifest,
+        ),
+        SupervisorResponse,
+    > {
+        let prepared = self
+            .prepare_snapshot_restore(snapshot_id, new_workspace_id)
+            .await?;
+        let manifest = prepared.manifest.clone();
+        let instance = self.boot_prepared_snapshot(prepared).await?;
+        Ok((instance, manifest))
     }
 
     /// Claim `workspace_id` for a cold boot, failing fast with
@@ -2598,6 +3536,7 @@ impl WorkspaceManager {
     /// for an id collision (the boot above released the lock for seconds).
     /// On collision, tear the loser down rather than leak it — for either
     /// exec backend (Firecracker chroot/netns, or the OpenShell sandbox).
+    #[cfg_attr(not(feature = "confidential-cvm"), allow(dead_code))]
     async fn register_or_teardown(
         &self,
         workspace_id: &str,
@@ -2615,8 +3554,24 @@ impl WorkspaceManager {
                     // Reclaim the loser's network slot too (terminate() only
                     // reaps the process + chroot; netns/NAT reclamation is the
                     // caller's job — mirror the main terminate handler).
+                    let FirecrackerWorkspace {
+                        instance,
+                        capacity_guard,
+                    } = *instance;
                     let network_slot = instance.network_slot.clone();
-                    let _ = crate::firecracker::terminate(*instance, Duration::from_secs(5)).await;
+                    match crate::firecracker::terminate(*instance, Duration::from_secs(5)).await {
+                        Ok(()) => drop(capacity_guard),
+                        Err(error) => {
+                            capacity_guard.fail_closed();
+                            let network = network_slot.clone().zip(self.cfg.network.clone());
+                            std::mem::forget((error, capacity_guard, network));
+                            return Err(SupervisorResponse::Error {
+                                kind: SupervisorErrorKind::Internal,
+                                message: "lost boot race could not confirm process exit"
+                                    .to_string(),
+                            });
+                        }
+                    }
                     if let (Some(slot), Some(controller)) = (network_slot, &self.cfg.network)
                         && let Err(e) = controller.teardown(slot).await
                     {
@@ -2635,6 +3590,40 @@ impl WorkspaceManager {
             });
         }
         guard.insert(workspace_id.to_string(), exec);
+        Ok(())
+    }
+
+    /// Insert a launched standard workspace while keeping its instance and
+    /// registered capacity guard cancellation-safe across the registry lock.
+    async fn register_pending_firecracker(
+        &self,
+        workspace_id: &str,
+        mut pending: PendingFirecracker,
+    ) -> Result<(), SupervisorResponse> {
+        let state = pending
+            .instance
+            .as_ref()
+            .map(|instance| instance.lifecycle_state)
+            .ok_or_else(|| capacity_error_response("pending Firecracker instance is missing"))?;
+        if let Err(error) = pending.register(state) {
+            pending.teardown().await;
+            return Err(capacity_error_response(&error.to_string()));
+        }
+        let mut instances = self.instances.lock().await;
+        if instances.contains_key(workspace_id) {
+            drop(instances);
+            pending.teardown().await;
+            return Err(SupervisorResponse::Error {
+                kind: SupervisorErrorKind::WorkspaceAlreadyExists,
+                message: format!("workspace {workspace_id} already exists"),
+            });
+        }
+        let Some(workspace) = pending.into_workspace() else {
+            return Err(capacity_error_response(
+                "pending Firecracker ownership is incomplete",
+            ));
+        };
+        instances.insert(workspace_id.to_string(), workspace);
         Ok(())
     }
 
@@ -2681,7 +3670,16 @@ impl WorkspaceManager {
         )
         .await
         {
-            let _ = crate::firecracker::terminate(instance, Duration::from_secs(5)).await;
+            if self
+                .terminate_unregistered_or_fault(instance)
+                .await
+                .is_err()
+            {
+                return Err((
+                    SupervisorErrorKind::Internal,
+                    UNCONFIRMED_TERMINATION_MESSAGE.to_string(),
+                ));
+            }
             return Err((
                 SupervisorErrorKind::RestoreFailed,
                 format!("live restore guest not ready: {e}"),
@@ -2706,13 +3704,44 @@ impl WorkspaceManager {
             match guard.remove(source_ws_id) {
                 Some(WorkspaceExec::Firecracker(inst)) if inst.boot_id == source_boot_id => {
                     // Verified same boot — splice the fresh instance in its place.
+                    let FirecrackerWorkspace {
+                        instance: old_instance,
+                        mut capacity_guard,
+                    } = *inst;
+                    if let Err(error) = capacity_guard.set_state(WorkspaceState::Running) {
+                        guard.insert(
+                            source_ws_id.to_string(),
+                            WorkspaceExec::Firecracker(Box::new(FirecrackerWorkspace {
+                                instance: old_instance,
+                                capacity_guard,
+                            })),
+                        );
+                        drop(guard);
+                        if self
+                            .terminate_unregistered_or_fault(instance)
+                            .await
+                            .is_err()
+                        {
+                            return Err((
+                                SupervisorErrorKind::Internal,
+                                UNCONFIRMED_TERMINATION_MESSAGE.to_string(),
+                            ));
+                        }
+                        return Err((
+                            SupervisorErrorKind::Internal,
+                            format!("live restore capacity transition failed: {error}"),
+                        ));
+                    }
                     let mut instance = instance;
                     instance.workspace_id = source_ws_id.to_string();
                     guard.insert(
                         source_ws_id.to_string(),
-                        WorkspaceExec::Firecracker(Box::new(instance)),
+                        WorkspaceExec::Firecracker(Box::new(FirecrackerWorkspace {
+                            instance: Box::new(instance),
+                            capacity_guard,
+                        })),
                     );
-                    inst
+                    old_instance
                 }
                 other => {
                     // Gone, replaced by a new boot, or a different backend:
@@ -2721,7 +3750,16 @@ impl WorkspaceManager {
                         guard.insert(source_ws_id.to_string(), entry);
                     }
                     drop(guard);
-                    let _ = crate::firecracker::terminate(instance, Duration::from_secs(5)).await;
+                    if self
+                        .terminate_unregistered_or_fault(instance)
+                        .await
+                        .is_err()
+                    {
+                        return Err((
+                            SupervisorErrorKind::Internal,
+                            UNCONFIRMED_TERMINATION_MESSAGE.to_string(),
+                        ));
+                    }
                     return Err((
                         SupervisorErrorKind::WorkspaceNotFound,
                         format!(
@@ -2734,8 +3772,15 @@ impl WorkspaceManager {
         };
 
         // Reap the old frozen FC process + chroot (outside the lock).
-        if let Err(e) = crate::firecracker::terminate(*old_instance, Duration::from_secs(5)).await {
-            warn!(workspace_id = %source_ws_id, error = %e, "live hot-swap: old source teardown failed");
+        if self
+            .terminate_unregistered_or_fault(*old_instance)
+            .await
+            .is_err()
+        {
+            return Err((
+                SupervisorErrorKind::Internal,
+                UNCONFIRMED_TERMINATION_MESSAGE.to_string(),
+            ));
         }
         Ok(new_pid)
     }
@@ -2758,14 +3803,13 @@ impl WorkspaceManager {
     /// guest, then reset its identity to `hostname` + a fresh machine-id + fresh
     /// RNG. Fail-closed: any failure tears the booted VM down. On success returns
     /// the live, `UNregistered` instance plus its new machine-id.
-    async fn boot_ready_reset(
+    async fn boot_prepared_ready_reset(
         &self,
-        snapshot_id: &str,
-        new_workspace_id: &str,
+        prepared: PreparedSnapshotRestore,
         hostname: &str,
     ) -> Result<(crate::firecracker::Instance, String), (SupervisorErrorKind, String)> {
-        let (instance, _manifest) = self
-            .boot_from_snapshot(snapshot_id, new_workspace_id)
+        let instance = self
+            .boot_prepared_snapshot(prepared)
             .await
             .map_err(|resp| match resp {
                 SupervisorResponse::Error { kind, message } => (kind, message),
@@ -2783,7 +3827,16 @@ impl WorkspaceManager {
         )
         .await
         {
-            let _ = crate::firecracker::terminate(instance, Duration::from_secs(5)).await;
+            if self
+                .terminate_unregistered_or_fault(instance)
+                .await
+                .is_err()
+            {
+                return Err((
+                    SupervisorErrorKind::Internal,
+                    UNCONFIRMED_TERMINATION_MESSAGE.to_string(),
+                ));
+            }
             return Err((
                 SupervisorErrorKind::ForkFailed,
                 format!("guest not ready: {e}"),
@@ -2794,7 +3847,16 @@ impl WorkspaceManager {
         let entropy_seed = match Self::fresh_entropy(32).await {
             Ok(b) => b,
             Err(e) => {
-                let _ = crate::firecracker::terminate(instance, Duration::from_secs(5)).await;
+                if self
+                    .terminate_unregistered_or_fault(instance)
+                    .await
+                    .is_err()
+                {
+                    return Err((
+                        SupervisorErrorKind::Internal,
+                        UNCONFIRMED_TERMINATION_MESSAGE.to_string(),
+                    ));
+                }
                 return Err((
                     SupervisorErrorKind::Internal,
                     format!("entropy generation failed: {e}"),
@@ -2814,20 +3876,58 @@ impl WorkspaceManager {
         {
             Ok(GuestResponse::IdentityReset { .. }) => Ok((instance, machine_id)),
             Ok(other) => {
-                let _ = crate::firecracker::terminate(instance, Duration::from_secs(5)).await;
+                if self
+                    .terminate_unregistered_or_fault(instance)
+                    .await
+                    .is_err()
+                {
+                    return Err((
+                        SupervisorErrorKind::Internal,
+                        UNCONFIRMED_TERMINATION_MESSAGE.to_string(),
+                    ));
+                }
                 Err((
                     SupervisorErrorKind::ForkFailed,
                     format!("identity reset: unexpected guest response: {other:?}"),
                 ))
             }
             Err(e) => {
-                let _ = crate::firecracker::terminate(instance, Duration::from_secs(5)).await;
+                if self
+                    .terminate_unregistered_or_fault(instance)
+                    .await
+                    .is_err()
+                {
+                    return Err((
+                        SupervisorErrorKind::Internal,
+                        UNCONFIRMED_TERMINATION_MESSAGE.to_string(),
+                    ));
+                }
                 Err((
                     SupervisorErrorKind::ForkFailed,
                     format!("identity reset failed: {e}"),
                 ))
             }
         }
+    }
+
+    /// Verify and boot a count-already-reserved pool provision.
+    async fn boot_ready_reset(
+        &self,
+        snapshot_id: &str,
+        new_workspace_id: &str,
+        hostname: &str,
+    ) -> Result<(crate::firecracker::Instance, String), (SupervisorErrorKind, String)> {
+        let prepared = self
+            .prepare_snapshot_restore(snapshot_id, new_workspace_id)
+            .await
+            .map_err(|response| match response {
+                SupervisorResponse::Error { kind, message } => (kind, message),
+                _ => (
+                    SupervisorErrorKind::Internal,
+                    "unexpected snapshot preparation response".to_string(),
+                ),
+            })?;
+        self.boot_prepared_ready_reset(prepared, hostname).await
     }
 
     /// Provision one pool member: a fresh fork from the tier base snapshot,
@@ -2861,6 +3961,29 @@ impl WorkspaceManager {
         Ok(instance)
     }
 
+    async fn pool_resource_dimensions(&self, snapshot_id: &str) -> Result<(u64, u64), String> {
+        if !is_valid_workspace_id(snapshot_id) {
+            return Err("invalid base snapshot identifier".to_string());
+        }
+        let snapshot_dir = crate::snapshot::snapshot_dir(&self.cfg.state_dir, snapshot_id);
+        let manifest = crate::snapshot::read_manifest(&snapshot_dir)
+            .await
+            .map_err(|_| "base snapshot manifest could not be read".to_string())?;
+        ne_protocol::snapshot::verify_manifest_signature_pinned(
+            &manifest,
+            &self.audit.verifying_key(),
+        )
+        .map_err(|_| "base snapshot manifest signature is invalid".to_string())?;
+        if manifest.guest_identity.mem_size_mib > self.max_workspace_mem_mib {
+            return Err("base snapshot memory exceeds configured workspace limit".to_string());
+        }
+        capacity_dimensions(
+            u64::from(manifest.guest_identity.vcpu_count),
+            u64::from(manifest.guest_identity.mem_size_mib),
+        )
+        .map_err(|_| "base snapshot resource dimensions overflow".to_string())
+    }
+
     /// Reserve and start the provisions needed to top the pool up to target.
     /// Each provision runs in its own task so up to `max_in_flight` boots
     /// proceed concurrently; accounting prevents over-spawn across ticks.
@@ -2869,41 +3992,50 @@ impl WorkspaceManager {
             return;
         };
         let me = Arc::clone(self);
-        tokio::spawn(async move {
-            // Admission control: pool refill boots real FC VMs, so
-            // it must respect the same combined instances+pool ceiling as the
-            // request paths. At (or over) the ceiling, DEFER — skip this tick
-            // with a warn rather than erroring; the next tick / kick retries
-            // once capacity frees. Soft, like the request-path guards: the
-            // count is a snapshot and can race a concurrent create by a VM or
-            // two. `live_vm_count` includes in-flight provisions, and
-            // headroom is computed BEFORE reserving, so the `take(headroom)`
-            // below can't overshoot from this tick's own reservations.
-            let headroom = {
-                let live = me.live_vm_count().await;
-                let headroom = me.max_workspaces.saturating_sub(live);
-                if headroom == 0 {
-                    warn!(
-                        live_vms = live,
-                        max_workspaces = me.max_workspaces,
-                        "warm-pool refill deferred: at combined live-VM capacity"
-                    );
+        let lifecycle_tasks = Arc::clone(&me.lifecycle_tasks);
+        let _ = lifecycle_tasks.spawn_operation(async move {
+            let snapshot_id = pool.config().base_snapshot_id.clone();
+            let (cpu_millicores, memory_bytes) =
+                match me.pool_resource_dimensions(&snapshot_id).await {
+                    Ok(dimensions) => dimensions,
+                    Err(reason) => {
+                        warn!(%reason, "warm-pool refill preflight failed");
+                        me.audit_emit(
+                            EventType::CommandFailed,
+                            None,
+                            serde_json::json!({ "op": "pool_preflight", "reason": reason }),
+                        )
+                        .await;
+                        return;
+                    }
+                };
+            let permits = match pool
+                .reserve_provisions(&me.capacity, cpu_millicores, memory_bytes)
+                .await
+            {
+                Ok(permits) => permits,
+                Err(crate::capacity::CapacityError::Exhausted) => {
+                    warn!("warm-pool refill deferred: capacity exhausted");
                     return;
                 }
-                headroom
+                Err(error) => {
+                    warn!(%error, "warm-pool capacity reservation failed");
+                    return;
+                }
             };
-            // One RAII permit per reserved slot: the success path consumes it via
-            // `complete_provision`; any failure — including a panic in the task —
-            // drops it, releasing the in-flight slot so it can never leak.
-            // Permits past the ceiling headroom are dropped immediately, which
-            // releases their in-flight slots for a later, freer tick.
-            let permits = pool.reserve_provisions().await;
-            for permit in permits.into_iter().take(headroom) {
+            for permit in permits {
                 let me2 = Arc::clone(&me);
                 let pool2 = Arc::clone(&pool);
-                tokio::spawn(async move {
+                let lifecycle_tasks = Arc::clone(&me2.lifecycle_tasks);
+                let _ = lifecycle_tasks.spawn_operation(async move {
                     match me2.provision_pool_member().await {
-                        Ok(member) => pool2.complete_provision(member, permit).await,
+                        Ok(member) => match pool2.complete_provision(member, permit).await {
+                            Ok(()) => {}
+                            Err(rejected) => {
+                                warn!(error = %rejected.error(), "warm-pool provision rejected after boot");
+                                rejected.teardown().await;
+                            }
+                        },
                         Err((kind, message)) => {
                             warn!(?kind, %message, "warm-pool provision failed");
                             me2.audit_emit(
@@ -2928,11 +4060,15 @@ impl WorkspaceManager {
             return;
         }
         let me = Arc::clone(self);
-        tokio::spawn(async move {
+        let lifecycle_tasks = Arc::clone(&me.lifecycle_tasks);
+        let _ = lifecycle_tasks.spawn_operation(async move {
             let Some(mut rx) = me.refill_rx.lock().await.take() else {
                 return;
             };
             loop {
+                if me.lifecycle_tasks.is_closed() {
+                    break;
+                }
                 me.refill_once();
                 tokio::select! {
                     () = tokio::time::sleep(crate::pool::POOL_REFILL_INTERVAL) => {}
@@ -2985,10 +4121,8 @@ impl WorkspaceManager {
         let Some(pool) = &self.pool else { return };
         let members = pool.drain().await;
         let n = members.len();
-        for inst in members {
-            if let Err(e) = crate::firecracker::terminate(inst, Duration::from_secs(5)).await {
-                warn!(error = %e, "warm-pool member teardown failed during shutdown");
-            }
+        for member in members {
+            member.teardown().await;
         }
         if n > 0 {
             info!(count = n, "warm-pool reaped on shutdown");
@@ -2996,30 +4130,23 @@ impl WorkspaceManager {
     }
 
     /// Restore a fresh workspace from a snapshot artifact.
-    pub async fn restore(&self, req: RestoreRequest) -> SupervisorResponse {
-        // Admission control: same soft ceiling as `create`, on the
-        // combined instances+warm-pool live-VM count — restore also boots a
-        // net-new VM. No mem_size_mib guard here: `RestoreRequest` carries no
-        // client-supplied memory size (it comes from the pinned snapshot
-        // manifest instead), so that check lives in `boot_from_snapshot`,
-        // applied once the manifest is loaded and before the VM is actually
-        // spawned.
-        if self.live_vm_count().await >= self.max_workspaces {
-            return SupervisorResponse::Error {
-                kind: SupervisorErrorKind::CapacityExceeded,
-                message: format!("at workspace capacity ({})", self.max_workspaces),
-            };
-        }
+    pub async fn restore(self: &Arc<Self>, req: RestoreRequest) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.restore_inner(req).await })
+            .await
+    }
 
+    async fn restore_inner(&self, req: RestoreRequest) -> SupervisorResponse {
         // Step 1: hold the caller-selected id through boot and registration.
         let _lifecycle_lease = match self.claim_boot(&req.new_workspace_id).await {
             Ok(claim) => claim,
             Err(resp) => return resp,
         };
 
-        // Step 2: verify + boot (shared with fork).
-        let (instance, _manifest) = match self
-            .boot_from_snapshot(&req.snapshot_id, &req.new_workspace_id)
+        // Step 2: authenticate the snapshot and reserve its exact signed
+        // dimensions before any Firecracker process can be spawned.
+        let prepared = match self
+            .prepare_snapshot_restore(&req.snapshot_id, &req.new_workspace_id)
             .await
         {
             Ok(v) => v,
@@ -3036,8 +4163,30 @@ impl WorkspaceManager {
                 return resp;
             }
         };
+        let vcpu_count = prepared.manifest.guest_identity.vcpu_count;
+        let mem_size_mib = prepared.manifest.guest_identity.mem_size_mib;
+        let (instance, capacity_reservation) = match self
+            .boot_with_reserved_capacity(
+                &req.new_workspace_id,
+                vcpu_count,
+                mem_size_mib,
+                self.boot_prepared_snapshot(prepared),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(response) => return response,
+        };
 
-        // Build the success response before the insert moves the instance.
+        let pending = PendingFirecracker::reserved(
+            instance,
+            capacity_reservation,
+            Arc::clone(&self.lifecycle_tasks),
+            None,
+        );
+        let Some(instance) = pending.instance() else {
+            return capacity_error_response("restored workspace ownership is incomplete");
+        };
         let resp = WorkspaceCreated {
             workspace_id: instance.workspace_id.clone(),
             firecracker_pid: instance.firecracker_pid,
@@ -3049,12 +4198,9 @@ impl WorkspaceManager {
             control_socket: None,
         };
 
-        // Step 3: register under the final lock with collision re-check.
+        // Step 3: promote and register under the final lock with collision re-check.
         if let Err(resp) = self
-            .register_or_teardown(
-                &req.new_workspace_id,
-                WorkspaceExec::Firecracker(Box::new(instance)),
-            )
+            .register_pending_firecracker(&req.new_workspace_id, pending)
             .await
         {
             return resp;
@@ -3088,37 +4234,31 @@ impl WorkspaceManager {
     /// Fail-closed: a fork is NEVER returned with un-reset identity. If the
     /// guest is unreachable or `ResetIdentity` fails, the freshly-booted VM
     /// is torn down and `ForkFailed` is returned.
-    pub async fn fork(&self, req: ForkRequest) -> SupervisorResponse {
-        // Admission control: same soft ceiling as `create`, on the
-        // combined instances+warm-pool live-VM count — fork also boots a
-        // net-new VM. No mem_size_mib guard here for the same reason as
-        // `restore`: `ForkRequest` carries no client-supplied memory size; it
-        // comes from the pinned snapshot manifest and is validated in
-        // `boot_from_snapshot` instead.
-        if self.live_vm_count().await >= self.max_workspaces {
-            return SupervisorResponse::Error {
-                kind: SupervisorErrorKind::CapacityExceeded,
-                message: format!("at workspace capacity ({})", self.max_workspaces),
-            };
-        }
+    pub async fn fork(self: &Arc<Self>, req: ForkRequest) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.fork_inner(req).await })
+            .await
+    }
 
+    async fn fork_inner(&self, req: ForkRequest) -> SupervisorResponse {
         // Step 1: hold the caller-selected id through boot and registration.
         let _lifecycle_lease = match self.claim_boot(&req.new_workspace_id).await {
             Ok(claim) => claim,
             Err(resp) => return resp,
         };
 
-        // Steps 2-4: boot + ready + identity reset (shared with pool provisioning).
+        // Steps 2-4: verify, reserve exact signed dimensions, then boot +
+        // ready + identity reset (shared with pool provisioning).
         let hostname = req
             .hostname
             .clone()
             .unwrap_or_else(|| req.new_workspace_id.clone());
-        let (instance, machine_id) = match self
-            .boot_ready_reset(&req.snapshot_id, &req.new_workspace_id, &hostname)
+        let prepared = match self
+            .prepare_snapshot_restore(&req.snapshot_id, &req.new_workspace_id)
             .await
         {
-            Ok(v) => v,
-            Err((kind, message)) => {
+            Ok(prepared) => prepared,
+            Err(SupervisorResponse::Error { kind, message }) => {
                 self.audit_emit(
                     EventType::CommandFailed,
                     Some(req.new_workspace_id.clone()),
@@ -3128,9 +4268,49 @@ impl WorkspaceManager {
                 .await;
                 return SupervisorResponse::Error { kind, message };
             }
+            Err(_) => {
+                return SupervisorResponse::Error {
+                    kind: SupervisorErrorKind::Internal,
+                    message: "unexpected snapshot preparation response".to_string(),
+                };
+            }
+        };
+        let vcpu_count = prepared.manifest.guest_identity.vcpu_count;
+        let mem_size_mib = prepared.manifest.guest_identity.mem_size_mib;
+        let boot = async {
+            self.boot_prepared_ready_reset(prepared, &hostname)
+                .await
+                .map_err(|(kind, message)| SupervisorResponse::Error { kind, message })
+        };
+        let ((instance, machine_id), capacity_reservation) = match self
+            .boot_with_reserved_capacity(&req.new_workspace_id, vcpu_count, mem_size_mib, boot)
+            .await
+        {
+            Ok(v) => v,
+            Err(SupervisorResponse::Error { kind, message }) => {
+                self.audit_emit(
+                    EventType::CommandFailed,
+                    Some(req.new_workspace_id.clone()),
+                    serde_json::json!({ "op": "fork", "snapshot_id": req.snapshot_id,
+                                            "error_kind": format!("{kind:?}"), "error": message }),
+                )
+                .await;
+                return SupervisorResponse::Error { kind, message };
+            }
+            Err(response) => return response,
         };
 
-        // Step 5: build response, register under final lock.
+        // Step 5: own the launched process and reservation through promotion
+        // and the final registry lock.
+        let pending = PendingFirecracker::reserved(
+            instance,
+            capacity_reservation,
+            Arc::clone(&self.lifecycle_tasks),
+            None,
+        );
+        let Some(instance) = pending.instance() else {
+            return capacity_error_response("forked workspace ownership is incomplete");
+        };
         let info = ForkInfo {
             workspace_id: instance.workspace_id.clone(),
             firecracker_pid: instance.firecracker_pid,
@@ -3142,10 +4322,7 @@ impl WorkspaceManager {
             guest_vsock_cid: instance.guest_vsock_cid,
         };
         if let Err(resp) = self
-            .register_or_teardown(
-                &req.new_workspace_id,
-                WorkspaceExec::Firecracker(Box::new(instance)),
-            )
+            .register_pending_firecracker(&req.new_workspace_id, pending)
             .await
         {
             return resp;
@@ -3177,7 +4354,13 @@ impl WorkspaceManager {
     ///
     /// The workspace must exist **and** be networked (have a TAP slot);
     /// non-networked workspaces have no host-visible guest IP to route to.
-    pub async fn expose_port(&self, req: ExposePortRequest) -> SupervisorResponse {
+    pub async fn expose_port(self: &Arc<Self>, req: ExposePortRequest) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.expose_port_inner(req).await })
+            .await
+    }
+
+    async fn expose_port_inner(&self, req: ExposePortRequest) -> SupervisorResponse {
         // Workspace must exist AND be networked (have a slot).
         let networked = self
             .instances
@@ -3243,7 +4426,13 @@ impl WorkspaceManager {
     }
 
     /// Stop exposing a previously-exposed guest port via host-based ingress routing.
-    pub async fn unexpose_port(&self, req: UnexposePortRequest) -> SupervisorResponse {
+    pub async fn unexpose_port(self: &Arc<Self>, req: UnexposePortRequest) -> SupervisorResponse {
+        let manager = Arc::clone(self);
+        self.run_tracked_lifecycle(async move { manager.unexpose_port_inner(req).await })
+            .await
+    }
+
+    async fn unexpose_port_inner(&self, req: UnexposePortRequest) -> SupervisorResponse {
         match self
             .ingress
             .unexpose_port(&req.workspace_id, req.port)
@@ -3628,19 +4817,67 @@ mod confidential_capacity_tests {
 }
 
 #[cfg(test)]
+mod manager_ceiling_tests {
+    use super::{WorkspaceManager, WorkspaceManagerConfig};
+    use crate::audit::AuditLog;
+
+    async fn construct(max_workspaces: usize) -> anyhow::Result<WorkspaceManager> {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let audit = AuditLog::open(state_dir.path()).await.expect("audit log");
+        let attestation = crate::attestation_factory::build_provider(
+            ne_protocol::profile::AttestationBackend::Software,
+            audit.signing_key(),
+        )
+        .expect("software attestation provider");
+        WorkspaceManager::new(
+            WorkspaceManagerConfig::dev_defaults(),
+            audit,
+            attestation,
+            max_workspaces,
+            32_768,
+        )
+    }
+
+    // Break caught: embedding callers could construct a manager whose ledger
+    // ceiling is zero or outside the public fleet-wire capacity range.
+    #[tokio::test]
+    async fn manager_constructor_enforces_the_fleet_workspace_ceiling() {
+        assert!(construct(0).await.is_err());
+        assert!(construct(1).await.is_ok());
+        assert!(
+            construct(
+                usize::try_from(ne_protocol::fleet::MAX_RUNNER_WORKSPACES)
+                    .expect("wire maximum fits usize")
+            )
+            .await
+            .is_ok()
+        );
+        assert!(construct(1_000_001).await.is_err());
+        if usize::BITS > 32 {
+            let above_u32 = usize::try_from(u64::from(u32::MAX) + 1)
+                .expect("wide pointer targets represent one above u32::MAX");
+            assert!(construct(above_u32).await.is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 #[cfg(target_os = "linux")]
 mod tests {
     use super::{
-        ImageError, ImageKind, NonceRing, PathBuf, WorkspaceExec, WorkspaceManager,
-        WorkspaceManagerConfig, compose_boot_args, guest_kind_to_supervisor_kind,
+        FirecrackerWorkspace, ImageError, ImageKind, NonceRing, PathBuf, WorkspaceExec,
+        WorkspaceManager, WorkspaceManagerConfig, compose_boot_args, guest_kind_to_supervisor_kind,
         is_valid_workspace_id, restore_launch_error_response,
     };
     use ne_protocol::guest::GuestErrorKind as G;
     use ne_protocol::supervisor::{
         CreateWorkspaceRequest, ForkRequest, RestoreRequest, SnapshotRequest,
-        SupervisorErrorKind as S, SupervisorResponse, WorkspaceRef, WorkspaceState,
+        SupervisorErrorKind as S, SupervisorResponse, TerminateRequest, WorkspaceRef,
+        WorkspaceState,
     };
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use crate::audit::AuditLog;
 
@@ -3655,7 +4892,7 @@ mod tests {
     /// Build a minimal `WorkspaceManager` backed by a tempdir state + audit
     /// log, with generous admission ceilings that no test here is meant to
     /// exercise.
-    async fn test_manager() -> WorkspaceManager {
+    async fn test_manager() -> Arc<WorkspaceManager> {
         test_manager_with_limits(1024, 32768).await
     }
 
@@ -3664,7 +4901,7 @@ mod tests {
     async fn test_manager_with_limits(
         max_workspaces: usize,
         max_workspace_mem_mib: u32,
-    ) -> WorkspaceManager {
+    ) -> Arc<WorkspaceManager> {
         let tmp = tempfile::tempdir().expect("tmpdir");
         // Leak so the audit file stays alive; bounded per-test.
         let state_dir = Box::leak(Box::new(tmp)).path().to_path_buf();
@@ -3676,14 +4913,443 @@ mod tests {
         let mut cfg = WorkspaceManagerConfig::dev_defaults();
         cfg.state_dir = state_dir;
         let attestation = software_provider(&audit);
-        WorkspaceManager::new(
-            cfg,
-            audit,
-            attestation,
-            max_workspaces,
-            max_workspace_mem_mib,
+        Arc::new(
+            WorkspaceManager::new(
+                cfg,
+                audit,
+                attestation,
+                max_workspaces,
+                max_workspace_mem_mib,
+            )
+            .expect("workspace manager"),
         )
-        .expect("workspace manager")
+    }
+
+    /// Minimal manager fixture with a manual warm pool. No KVM process is
+    /// launched; tests supply a harmless child to exercise pool ownership.
+    async fn test_manager_with_pool() -> Arc<WorkspaceManager> {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let state_dir = Box::leak(Box::new(tmp)).path().to_path_buf();
+        tokio::fs::create_dir_all(state_dir.join("keys"))
+            .await
+            .expect("keys dir");
+        let audit = AuditLog::open(&state_dir).await.expect("audit open");
+        let mut cfg = WorkspaceManagerConfig::dev_defaults();
+        cfg.state_dir = state_dir;
+        cfg.warm_pool = Some(crate::pool::WarmPoolConfig {
+            tier_name: "test".to_string(),
+            base_snapshot_id: "snapshot".to_string(),
+            target_size: 1,
+            max_in_flight: 1,
+        });
+        let attestation = software_provider(&audit);
+        Arc::new(
+            WorkspaceManager::new(cfg, audit, attestation, 2, 32_768).expect("workspace manager"),
+        )
+    }
+
+    async fn pending_test_instance(
+        temp: &tempfile::TempDir,
+    ) -> (crate::firecracker::Instance, u32) {
+        let jailer_root = temp.path().join("jailer");
+        std::fs::create_dir_all(jailer_root.join("root")).expect("test chroot");
+        let child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep child");
+        let pid = child.id().expect("child pid");
+        (
+            crate::firecracker::Instance {
+                workspace_id: "pending-cancel".to_string(),
+                boot_id: "boot".to_string(),
+                child,
+                firecracker_pid: pid,
+                api_socket_host: temp.path().join("api"),
+                vsock_host_socket: temp.path().join("vsock"),
+                jailer_chroot: jailer_root.join("root"),
+                jailer_uid: 0,
+                jailer_gid: 0,
+                lifecycle_state: WorkspaceState::Running,
+                network_slot: None,
+                guest_vsock_cid: 3,
+                vcpu_count: 1,
+                mem_size_mib: 1,
+                kernel_boot_args: String::new(),
+                kernel_sha256: "11".repeat(32),
+                rootfs_sha256: "22".repeat(32),
+                rootfs_read_only: true,
+            },
+            pid,
+        )
+    }
+
+    // Break caught: manager registry removal and warm-pool ownership changes
+    // could race publication of the supervisor-owned capacity snapshot.
+    #[tokio::test]
+    async fn manager_lifecycle_and_pool_transitions_publish_valid_capacity_snapshots() {
+        let manager = test_manager_with_pool().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        insert_fake_instance(&manager, "sampler-registered", "boot-sampler").await;
+        let pool = manager.pool.clone().expect("configured pool");
+        let permits = pool
+            .reserve_provisions(&manager.capacity, 1_000, 1_024 * 1_024)
+            .await
+            .expect("pool reservation");
+        let permit = permits.into_iter().next().expect("one permit");
+        let (instance, _pid) = pending_test_instance(&temp).await;
+        pool.complete_provision(instance, permit)
+            .await
+            .expect("ready member");
+
+        let done = Arc::new(AtomicBool::new(false));
+        let sampler_manager = Arc::clone(&manager);
+        let sampler_done = Arc::clone(&done);
+        let sampler = tokio::spawn(async move {
+            while !sampler_done.load(Ordering::Acquire) {
+                let snapshot = sampler_manager
+                    .capacity
+                    .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
+                    .expect("capacity snapshot");
+                snapshot.validate().expect("wire-valid snapshot");
+                assert!(snapshot.registered_workspaces <= snapshot.resident_workspaces);
+                assert!(snapshot.runnable_workspaces <= snapshot.registered_workspaces);
+                assert!(
+                    snapshot.registered_workspaces + snapshot.warm_pool_reserved_slots
+                        <= snapshot.configured_workspace_ceiling
+                );
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let response = manager
+            .terminate(TerminateRequest {
+                workspace_id: "sampler-registered".to_string(),
+                grace_period_ms: 1,
+            })
+            .await;
+        assert!(matches!(
+            response,
+            SupervisorResponse::WorkspaceTerminated { .. }
+        ));
+        let member = pool.pop().await.expect("ready member");
+        member.teardown().await;
+        done.store(true, Ordering::Release);
+        sampler.await.expect("sampler task");
+
+        let final_snapshot = manager
+            .capacity
+            .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
+            .expect("final snapshot");
+        assert_eq!(final_snapshot.registered_workspaces, 0);
+        assert_eq!(final_snapshot.warm_pool_reserved_slots, 0);
+    }
+
+    #[tokio::test]
+    async fn authenticated_admission_does_not_invoke_boot_when_capacity_is_exhausted() {
+        let manager = test_manager_with_limits(1, 32768).await;
+        let _occupied = manager
+            .capacity
+            .reserve_workspace("occupied", 1_000, 1_024)
+            .expect("occupy the only admission slot");
+        let calls = AtomicUsize::new(0);
+        let result = manager
+            .boot_with_reserved_capacity("full", 1, 128, async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, SupervisorResponse>(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(SupervisorResponse::Error {
+                kind: S::CapacityExceeded,
+                ..
+            })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn authenticated_admission_releases_reservation_when_boot_fails() {
+        let manager = test_manager_with_limits(1, 32768).await;
+        let calls = AtomicUsize::new(0);
+        let result = manager
+            .boot_with_reserved_capacity("boot-fails", 1, 128, async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<(), _>(SupervisorResponse::Error {
+                    kind: S::LaunchFailed,
+                    message: "test boot failure".to_string(),
+                })
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(SupervisorResponse::Error {
+                kind: S::LaunchFailed,
+                ..
+            })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let capacity = manager
+            .capacity
+            .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
+            .expect("released snapshot");
+        assert_eq!(capacity.revision, 2);
+        assert_eq!(capacity.registered_workspaces, 0);
+        assert_eq!(capacity.resident_workspaces, 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_waiting_for_pending_registry_transfer_reaps_before_release() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manager = test_manager_with_limits(1, 32768).await;
+        let (instance, pid) = pending_test_instance(&temp).await;
+        let network_cleanup = Arc::new(AtomicUsize::new(0));
+        let capacity_guard = manager
+            .capacity
+            .reserve_workspace("pending-cancel", 1_000, 1_024)
+            .expect("reservation")
+            .register(WorkspaceState::Running)
+            .expect("registration");
+        let pending = super::PendingFirecracker::registered(
+            instance,
+            capacity_guard,
+            Arc::clone(&manager.lifecycle_tasks),
+            Some(super::PendingNetworkCleanup::Probe(
+                super::PendingNetworkCleanupProbe {
+                    completed: Arc::clone(&network_cleanup),
+                    pid,
+                    jailer_root: temp.path().join("jailer"),
+                    ledger: Arc::clone(&manager.capacity),
+                },
+            )),
+        );
+        let registry_lock = manager.instances.lock().await;
+        let task_manager = Arc::clone(&manager);
+        let task = tokio::spawn(async move {
+            task_manager
+                .register_pending_firecracker("pending-cancel", pending)
+                .await
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        drop(registry_lock);
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let exited = matches!(
+                    nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(i32::try_from(pid).expect("pid")),
+                        None
+                    ),
+                    Err(nix::errno::Errno::ESRCH)
+                );
+                let released = manager
+                    .capacity
+                    .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
+                    .map(|snapshot| {
+                        snapshot.registered_workspaces == 0
+                            && snapshot.resident_workspaces == 0
+                            && snapshot.runnable_workspaces == 0
+                    })
+                    .unwrap_or(false);
+                if exited
+                    && !temp.path().join("jailer").exists()
+                    && network_cleanup.load(Ordering::Acquire) == 1
+                    && released
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled pending registration must reap child and release capacity");
+    }
+
+    // Break caught: an IPC waiter cancellation could abort raw post-boot work
+    // while it held a launched instance and direct reservation outside the
+    // registry. The tracked inner operation must survive through each gate.
+    #[tokio::test]
+    async fn tracked_raw_instance_survives_waiter_abort_and_shutdown_drain() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manager = test_manager_with_limits(1, 32768).await;
+        let (instance, pid) = pending_test_instance(&temp).await;
+        let reservation = manager
+            .capacity
+            .reserve_workspace("raw-gated", 1_000, 1_024)
+            .expect("reservation");
+        let ready_gate = Arc::new(tokio::sync::Notify::new());
+        let reset_gate = Arc::new(tokio::sync::Notify::new());
+        let audit_gate = Arc::new(tokio::sync::Notify::new());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let entered_wait = Arc::clone(&entered);
+        let tasks = manager.lifecycle_tasks();
+        let raw_manager = Arc::clone(&manager);
+        let operation_entered = Arc::clone(&entered);
+        let operation_ready_gate = Arc::clone(&ready_gate);
+        let operation_reset_gate = Arc::clone(&reset_gate);
+        let operation_audit_gate = Arc::clone(&audit_gate);
+        let outer = tokio::spawn(async move {
+            raw_manager
+                .run_tracked_lifecycle(async move {
+                    operation_entered.notify_one();
+                    operation_ready_gate.notified().await;
+                    operation_reset_gate.notified().await;
+                    operation_audit_gate.notified().await;
+                    let _ = crate::firecracker::terminate(instance, Duration::from_secs(5)).await;
+                    drop(reservation);
+                    SupervisorResponse::WorkspaceTerminated {
+                        workspace_id: "raw-gated".to_string(),
+                    }
+                })
+                .await
+        });
+        entered_wait.notified().await;
+        outer.abort();
+        let _ = outer.await;
+
+        manager.close_lifecycle();
+        let wait_tasks = Arc::clone(&tasks);
+        let mut drained = tokio::spawn(async move { wait_tasks.wait().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut drained)
+                .await
+                .is_err()
+        );
+        ready_gate.notify_one();
+        reset_gate.notify_one();
+        audit_gate.notify_one();
+        drained.await.expect("tracked operation drains");
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let exited = matches!(
+                    nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(i32::try_from(pid).expect("pid")),
+                        None
+                    ),
+                    Err(nix::errno::Errno::ESRCH)
+                );
+                let released = manager
+                    .capacity
+                    .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
+                    .map(|snapshot| {
+                        snapshot.registered_workspaces == 0 && snapshot.resident_workspaces == 0
+                    })
+                    .unwrap_or(false);
+                if exited && !temp.path().join("jailer").exists() && released {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("tracked raw teardown must complete before capacity release");
+    }
+
+    // Break caught: a pending owner created immediately after launch must
+    // retain both the process and its reservation when promotion faults.
+    #[tokio::test]
+    async fn pending_reserved_registration_fault_reaps_before_fail_closed_capacity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manager = test_manager_with_limits(1, 32768).await;
+        let (instance, pid) = pending_test_instance(&temp).await;
+        let reservation = manager
+            .capacity
+            .reserve_workspace("pending-registration-fault", 1_000, 1_024)
+            .expect("reservation");
+        manager.capacity.force_revision_for_test(u64::MAX);
+        let response = manager
+            .register_pending_firecracker(
+                "pending-registration-fault",
+                super::PendingFirecracker::reserved(
+                    instance,
+                    reservation,
+                    Arc::clone(&manager.lifecycle_tasks),
+                    None,
+                ),
+            )
+            .await;
+        assert!(matches!(
+            response,
+            Err(SupervisorResponse::Error {
+                kind: S::Internal,
+                ..
+            })
+        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let exited = matches!(
+                    nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(i32::try_from(pid).expect("pid")),
+                        None
+                    ),
+                    Err(nix::errno::Errno::ESRCH)
+                );
+                if exited && !temp.path().join("jailer").exists() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("promotion fault must reap the pending launched instance");
+        assert!(matches!(
+            manager
+                .capacity
+                .snapshot(ne_protocol::profile::ExecutionProfile::Standard),
+            Err(crate::capacity::CapacityError::Faulted)
+        ));
+    }
+
+    // Break caught: a direct WorkspaceManager caller could cancel snapshot
+    // after it published Snapshotting but before the unlocked work finalized.
+    #[tokio::test]
+    async fn direct_snapshot_waiter_abort_finishes_registry_and_ledger_state() {
+        let manager = test_manager().await;
+        let workspace_id = "direct-snapshot-cancel";
+        insert_fake_instance(&manager, workspace_id, "boot-direct").await;
+        let marked = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        manager.set_snapshot_after_mark_gate(Arc::clone(&marked), Arc::clone(&release));
+
+        let task_manager = Arc::clone(&manager);
+        let request_id = workspace_id.to_string();
+        let outer = tokio::spawn(async move {
+            task_manager
+                .snapshot(SnapshotRequest {
+                    workspace_id: request_id,
+                    live: false,
+                })
+                .await
+        });
+        marked.notified().await;
+        outer.abort();
+        let _ = outer.await;
+
+        manager.close_lifecycle();
+        let tasks = manager.lifecycle_tasks();
+        let mut drained = tokio::spawn(async move { tasks.wait().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut drained)
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        drained.await.expect("tracked snapshot must drain");
+
+        let state = fake_lifecycle_state(&manager, workspace_id).await;
+        assert_ne!(state, WorkspaceState::Snapshotting);
+        let capacity = manager
+            .capacity
+            .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
+            .expect("capacity snapshot");
+        assert_eq!(capacity.registered_workspaces, 1);
+        assert_eq!(
+            capacity.runnable_workspaces,
+            u32::from(state == WorkspaceState::Running)
+        );
     }
 
     /// Fabricate a registered Firecracker instance with a known boot token.
@@ -3717,7 +5383,12 @@ mod tests {
         };
         mgr.instances.lock().await.insert(
             ws_id.to_string(),
-            WorkspaceExec::Firecracker(Box::new(instance)),
+            WorkspaceExec::Firecracker(Box::new(FirecrackerWorkspace {
+                capacity_guard: mgr
+                    .register_instance_capacity(&instance)
+                    .expect("capacity guard"),
+                instance: Box::new(instance),
+            })),
         );
     }
 
@@ -4051,27 +5722,34 @@ mod tests {
             let child = tokio::process::Command::new("/usr/bin/true")
                 .spawn()
                 .expect("spawn harmless child");
+            let instance = crate::firecracker::Instance {
+                workspace_id: id.clone(),
+                boot_id: ulid::Ulid::new().to_string(),
+                child,
+                firecracker_pid: 1,
+                api_socket_host: PathBuf::from("/unused/api.sock"),
+                vsock_host_socket: PathBuf::from("/unused/vsock.sock"),
+                jailer_chroot: PathBuf::from("/unused/chroot"),
+                jailer_uid: 1000,
+                jailer_gid: 1000,
+                lifecycle_state: WorkspaceState::Running,
+                network_slot: None,
+                guest_vsock_cid: 3,
+                vcpu_count: 1,
+                mem_size_mib: 128,
+                kernel_boot_args: "console=ttyS0".into(),
+                kernel_sha256: "11".repeat(32),
+                rootfs_sha256: "22".repeat(32),
+                rootfs_read_only: false,
+            };
+            let capacity_guard = mgr
+                .register_instance_capacity(&instance)
+                .expect("capacity guard");
             mgr.instances.lock().await.insert(
                 id.clone(),
-                WorkspaceExec::Firecracker(Box::new(crate::firecracker::Instance {
-                    workspace_id: id.clone(),
-                    boot_id: ulid::Ulid::new().to_string(),
-                    child,
-                    firecracker_pid: 1,
-                    api_socket_host: PathBuf::from("/unused/api.sock"),
-                    vsock_host_socket: PathBuf::from("/unused/vsock.sock"),
-                    jailer_chroot: PathBuf::from("/unused/chroot"),
-                    jailer_uid: 1000,
-                    jailer_gid: 1000,
-                    lifecycle_state: WorkspaceState::Running,
-                    network_slot: None,
-                    guest_vsock_cid: 3,
-                    vcpu_count: 1,
-                    mem_size_mib: 128,
-                    kernel_boot_args: "console=ttyS0".into(),
-                    kernel_sha256: "11".repeat(32),
-                    rootfs_sha256: "22".repeat(32),
-                    rootfs_read_only: false,
+                WorkspaceExec::Firecracker(Box::new(FirecrackerWorkspace {
+                    instance: Box::new(instance),
+                    capacity_guard,
                 })),
             );
 
@@ -4212,9 +5890,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_rejects_at_workspace_capacity() {
-        // A zero ceiling means "0 registered >= 0 allowed" is always true —
-        // exercises the count guard without needing a real boot.
-        let mgr = test_manager_with_limits(0, 32768).await;
+        // Constructor validation rejects zero; occupy the valid one-slot
+        // ledger instead, so this keeps exercising pre-spawn admission.
+        let mgr = test_manager_with_limits(1, 32768).await;
+        let _occupied = mgr
+            .capacity
+            .reserve_workspace("occupied", 1_000, 1_024)
+            .expect("occupy the only workspace slot");
         let req = CreateWorkspaceRequest {
             workspace_id: "ws-cap".into(),
             kernel_sha256: "11".repeat(32),
@@ -4241,8 +5923,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_vm_count_includes_warm_pool_and_create_respects_it() {
-        // Manager with a pool and a combined live-VM ceiling of 2.
+    async fn pool_reservations_exhaust_workspace_capacity() {
+        // Manager with a pool and a combined ledger ceiling of 2.
         let tmp = tempfile::tempdir().expect("tmpdir");
         let state_dir = Box::leak(Box::new(tmp)).path().to_path_buf();
         tokio::fs::create_dir_all(state_dir.join("keys"))
@@ -4258,20 +5940,21 @@ mod tests {
             max_in_flight: 2,
         });
         let attestation = software_provider(&audit);
-        let mgr =
-            WorkspaceManager::new(cfg, audit, attestation, 2, 32768).expect("workspace manager");
-        assert_eq!(mgr.live_vm_count().await, 0);
+        let mgr = Arc::new(
+            WorkspaceManager::new(cfg, audit, attestation, 2, 32768).expect("workspace manager"),
+        );
 
         // Simulate two live pool VMs without booting anything: reserved
         // provision permits count as in-flight, and in-flight provisions are
         // real booting FC processes as far as the ceiling is concerned.
         let pool = mgr.pool.clone().expect("pool configured");
-        let permits = pool.reserve_provisions().await;
+        let permits = pool
+            .reserve_provisions(&mgr.capacity, 1_000, 128 * 1_024 * 1_024)
+            .await
+            .expect("pool reservations");
         assert_eq!(permits.len(), 2);
-        assert_eq!(mgr.live_vm_count().await, 2);
-
-        // A cold create must now be rejected: zero registered instances, but
-        // the combined instances+pool live-VM count is at the ceiling.
+        // The reserved pool entries consume the combined ledger ceiling even
+        // though they are not registered workspaces yet.
         let resp = mgr
             .create(CreateWorkspaceRequest {
                 workspace_id: "ws-pool-cap".into(),
@@ -4300,12 +5983,17 @@ mod tests {
         // Dropping the permits releases the in-flight slots: the combined
         // count returns to zero and capacity frees for the next refill tick.
         drop(permits);
-        assert_eq!(mgr.live_vm_count().await, 0);
+        let capacity = mgr
+            .capacity
+            .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
+            .expect("released pool capacity");
+        assert_eq!(capacity.resident_workspaces, 0);
+        assert_eq!(capacity.warm_pool_reserved_slots, 0);
     }
 
     #[tokio::test]
-    async fn restore_rejects_at_workspace_capacity() {
-        let mgr = test_manager_with_limits(0, 32768).await;
+    async fn restore_authenticates_snapshot_before_capacity_admission() {
+        let mgr = test_manager_with_limits(1, 32768).await;
         let resp = mgr
             .restore(RestoreRequest {
                 snapshot_id: "snap".into(),
@@ -4316,17 +6004,17 @@ mod tests {
             matches!(
                 resp,
                 SupervisorResponse::Error {
-                    kind: S::CapacityExceeded,
+                    kind: S::InvalidSnapshot,
                     ..
                 }
             ),
-            "expected CapacityExceeded, got {resp:?}"
+            "untrusted snapshot must fail before capacity admission, got {resp:?}"
         );
     }
 
     #[tokio::test]
-    async fn fork_rejects_at_workspace_capacity() {
-        let mgr = test_manager_with_limits(0, 32768).await;
+    async fn fork_authenticates_snapshot_before_capacity_admission() {
+        let mgr = test_manager_with_limits(1, 32768).await;
         let resp = mgr
             .fork(ForkRequest {
                 snapshot_id: "snap".into(),
@@ -4338,11 +6026,11 @@ mod tests {
             matches!(
                 resp,
                 SupervisorResponse::Error {
-                    kind: S::CapacityExceeded,
+                    kind: S::InvalidSnapshot,
                     ..
                 }
             ),
-            "expected CapacityExceeded, got {resp:?}"
+            "untrusted snapshot must fail before capacity admission, got {resp:?}"
         );
     }
 
@@ -4429,8 +6117,9 @@ mod tests {
             None,
         ));
         let attestation = software_provider(&audit);
-        let mgr =
-            WorkspaceManager::new(cfg, audit, attestation, 1024, 32768).expect("workspace manager");
+        let mgr = Arc::new(
+            WorkspaceManager::new(cfg, audit, attestation, 1024, 32768).expect("workspace manager"),
+        );
         let response = mgr
             .create(CreateWorkspaceRequest {
                 workspace_id: "missing-image".into(),
