@@ -28,6 +28,10 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
+use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
@@ -45,6 +49,21 @@ static MAX_GUEST_FRAME_BYTES: LazyLock<u64> = LazyLock::new(|| {
         32 * 1024 * 1024,
     )
 });
+
+/// Narrow child-control seam for ownership tests, keyed to the exact test
+/// instance. It simulates an exit/reap check that cannot establish whether the
+/// child is gone; callers must keep the returned owning error and their
+/// capacity owner fail-closed.
+#[cfg(test)]
+static INJECT_CHILD_CONTROL_FAILURES: LazyLock<Mutex<HashSet<(String, String)>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn inject_child_control_failure_once_for_test(workspace_id: &str, boot_id: &str) {
+    if let Ok(mut targets) = INJECT_CHILD_CONTROL_FAILURES.lock() {
+        targets.insert((workspace_id.to_string(), boot_id.to_string()));
+    }
+}
 
 /// Per-MiB timeout budget added on top of [`FC_API_TIMEOUT_MS`] for
 /// `/snapshot/create` and `/snapshot/load`, which serialize/deserialize
@@ -234,15 +253,37 @@ pub enum LaunchError {
     },
 }
 
-/// Errors returned by [`terminate`].
-#[derive(Debug, thiserror::Error)]
-pub enum TerminateError {
-    /// IO error reading process status or removing chroot.
-    #[error("io: {0}")]
-    Io(#[from] io::Error),
-    /// nix-crate error from a `kill(2)` call.
-    #[error("nix: {0}")]
-    Nix(#[from] nix::Error),
+/// A termination failure that retains the live instance until a caller can
+/// fail closed or retry cleanup. An unconfirmed child must never be reduced
+/// to a plain diagnostic while its capacity owner is released.
+#[derive(Debug)]
+pub struct TerminateError {
+    instance: Instance,
+    cause: io::Error,
+}
+
+impl TerminateError {
+    fn new(instance: Instance, cause: io::Error) -> Self {
+        Self { instance, cause }
+    }
+
+    /// Recover the still-owned instance after a failed exit/reap check.
+    #[must_use]
+    pub fn into_instance(self) -> Instance {
+        self.instance
+    }
+}
+
+impl std::fmt::Display for TerminateError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "termination not confirmed: {}", self.cause)
+    }
+}
+
+impl std::error::Error for TerminateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
 }
 
 /// Output of [`spawn_jailed_firecracker`]: the live process handle plus the
@@ -723,6 +764,20 @@ pub async fn terminate(mut instance: Instance, grace: Duration) -> Result<(), Te
     debug!(workspace_id = %instance.workspace_id, pid = %pid, "sending SIGTERM");
     let _ = kill(pid, Signal::SIGTERM);
 
+    #[cfg(test)]
+    let injected = INJECT_CHILD_CONTROL_FAILURES
+        .lock()
+        .is_ok_and(|mut targets| {
+            targets.remove(&(instance.workspace_id.clone(), instance.boot_id.clone()))
+        });
+    #[cfg(test)]
+    if injected {
+        return Err(TerminateError::new(
+            instance,
+            io::Error::other("injected child-control termination failure"),
+        ));
+    }
+
     let deadline = Instant::now() + grace;
     loop {
         match instance.child.try_wait() {
@@ -731,14 +786,19 @@ pub async fn terminate(mut instance: Instance, grace: Duration) -> Result<(), Te
                 break;
             }
             Ok(None) => {}
-            Err(e) => return Err(e.into()),
+            Err(error) => return Err(TerminateError::new(instance, error)),
         }
         if Instant::now() >= deadline {
             warn!(workspace_id = %instance.workspace_id, "grace expired, escalating to SIGKILL");
             let primary = LaunchError::Io(io::Error::other("graceful termination timed out"));
-            confirm_child_exit(&mut instance.child, "workspace termination", &primary)
-                .await
-                .map_err(|error| io::Error::other(error.to_string()))?;
+            if let Err(error) =
+                confirm_child_exit(&mut instance.child, "workspace termination", &primary).await
+            {
+                return Err(TerminateError::new(
+                    instance,
+                    io::Error::other(error.to_string()),
+                ));
+            }
             break;
         }
         sleep(Duration::from_millis(25)).await;
@@ -1304,6 +1364,130 @@ mod tests {
 
         assert!(matches!(error, LaunchError::Io(_)));
         assert!(!root.exists());
+    }
+
+    // Break caught: reducing an unconfirmed termination to a diagnostic lets
+    // the caller drop its capacity guard without a retryable process owner.
+    #[tokio::test]
+    async fn terminate_failure_returns_instance_for_owning_retry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let jailer_root = tmp.path().join("jailer");
+        let chroot = jailer_root.join("root");
+        tokio::fs::create_dir_all(&chroot)
+            .await
+            .expect("test chroot");
+        let child = Command::new("sleep").arg("30").spawn().expect("child");
+        let pid = child.id().expect("child pid");
+        let instance = Instance {
+            workspace_id: "termination-owner".to_string(),
+            boot_id: "boot".to_string(),
+            child,
+            firecracker_pid: pid,
+            api_socket_host: tmp.path().join("api"),
+            vsock_host_socket: tmp.path().join("vsock"),
+            jailer_chroot: chroot,
+            jailer_uid: 0,
+            jailer_gid: 0,
+            lifecycle_state: ne_protocol::supervisor::WorkspaceState::Running,
+            network_slot: None,
+            guest_vsock_cid: 3,
+            vcpu_count: 1,
+            mem_size_mib: 1,
+            kernel_boot_args: String::new(),
+            kernel_sha256: "11".repeat(32),
+            rootfs_sha256: "22".repeat(32),
+            rootfs_read_only: true,
+        };
+
+        inject_child_control_failure_once_for_test("termination-owner", "boot");
+        let error = terminate(instance, Duration::from_millis(1))
+            .await
+            .expect_err("injected exit check failure");
+        assert!(jailer_root.exists(), "unconfirmed child keeps its chroot");
+
+        let retry = error.into_instance();
+        assert_eq!(retry.workspace_id, "termination-owner");
+        terminate(retry, Duration::from_secs(1))
+            .await
+            .expect("owning caller retries cleanup");
+        assert!(!jailer_root.exists(), "confirmed retry removes chroot");
+    }
+
+    // Break caught: a process-global injected failure lets an unrelated
+    // parallel termination consume the target's test fault.
+    #[tokio::test]
+    async fn termination_failure_injection_is_scoped_to_target_instance() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let other_root = tmp.path().join("other-jailer");
+        let other_chroot = other_root.join("root");
+        tokio::fs::create_dir_all(&other_chroot)
+            .await
+            .expect("other test chroot");
+        let other_child = Command::new("sleep").arg("30").spawn().expect("child");
+        let other_pid = other_child.id().expect("child pid");
+        let other = Instance {
+            workspace_id: "other-termination-owner".to_string(),
+            boot_id: "other-boot".to_string(),
+            child: other_child,
+            firecracker_pid: other_pid,
+            api_socket_host: tmp.path().join("other-api"),
+            vsock_host_socket: tmp.path().join("other-vsock"),
+            jailer_chroot: other_chroot,
+            jailer_uid: 0,
+            jailer_gid: 0,
+            lifecycle_state: ne_protocol::supervisor::WorkspaceState::Running,
+            network_slot: None,
+            guest_vsock_cid: 3,
+            vcpu_count: 1,
+            mem_size_mib: 1,
+            kernel_boot_args: String::new(),
+            kernel_sha256: "11".repeat(32),
+            rootfs_sha256: "22".repeat(32),
+            rootfs_read_only: true,
+        };
+
+        let target_root = tmp.path().join("target-jailer");
+        let target_chroot = target_root.join("root");
+        tokio::fs::create_dir_all(&target_chroot)
+            .await
+            .expect("target test chroot");
+        let target_child = Command::new("sleep").arg("30").spawn().expect("child");
+        let target_pid = target_child.id().expect("child pid");
+        let target = Instance {
+            workspace_id: "target-termination-owner".to_string(),
+            boot_id: "target-boot".to_string(),
+            child: target_child,
+            firecracker_pid: target_pid,
+            api_socket_host: tmp.path().join("target-api"),
+            vsock_host_socket: tmp.path().join("target-vsock"),
+            jailer_chroot: target_chroot,
+            jailer_uid: 0,
+            jailer_gid: 0,
+            lifecycle_state: ne_protocol::supervisor::WorkspaceState::Running,
+            network_slot: None,
+            guest_vsock_cid: 3,
+            vcpu_count: 1,
+            mem_size_mib: 1,
+            kernel_boot_args: String::new(),
+            kernel_sha256: "11".repeat(32),
+            rootfs_sha256: "22".repeat(32),
+            rootfs_read_only: true,
+        };
+
+        inject_child_control_failure_once_for_test("target-termination-owner", "target-boot");
+        terminate(other, Duration::from_secs(1))
+            .await
+            .expect("different instance must not consume target injection");
+        assert!(!other_root.exists(), "unrelated instance was reaped");
+
+        let error = terminate(target, Duration::from_millis(1))
+            .await
+            .expect_err("target instance receives injection");
+        let target = error.into_instance();
+        terminate(target, Duration::from_secs(1))
+            .await
+            .expect("target cleanup retry");
+        assert!(!target_root.exists(), "target retry reaps its child");
     }
 
     /// Spawn a fake vsock-style UDS server that accepts one connection,

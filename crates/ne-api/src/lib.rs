@@ -22,14 +22,18 @@
 
 pub mod auth;
 pub mod core;
+/// Optional outbound HTTPS client for fleet coordination.
+pub mod fleet_client;
 pub mod rest;
 pub mod server;
 pub mod supervisor_client;
 pub mod tls;
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::Router;
@@ -38,6 +42,7 @@ use tonic::transport::{Server, ServerTlsConfig};
 
 use crate::auth::ApiKeyStore;
 use crate::core::RuntimeCore;
+use crate::fleet_client::{FleetClient, FleetClientConfig, run_fleet_loop};
 use crate::server::RuntimeService;
 use crate::tls::TlsConfig;
 
@@ -194,6 +199,8 @@ pub struct ApiConfig {
     /// In-process TLS material. `None` = plaintext (allowed only in dev
     /// mode or on a loopback bind in production).
     pub tls: Option<TlsConfig>,
+    /// Optional outbound fleet polling configuration.
+    pub fleet: Option<FleetClientConfig>,
 }
 
 impl ApiConfig {
@@ -285,20 +292,80 @@ pub async fn serve(cfg: ApiConfig) -> anyhow::Result<()> {
         tls = cfg.tls.is_some(),
         "ne-api starting"
     );
-    let core = Arc::new(RuntimeCore::new(SupervisorClient::new(
-        cfg.supervisor_socket,
-    )));
+    let supervisor = SupervisorClient::new(cfg.supervisor_socket);
+    let core = Arc::new(RuntimeCore::new(supervisor.clone()));
     let auth = if cfg.dev_mode {
         None
     } else {
         Some(Arc::clone(&cfg.api_keys))
     };
-    run(core, cfg.grpc_bind, cfg.rest_bind, auth, cfg.tls).await
+    let fleet_task = cfg.fleet.map(|fleet| {
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let supervisor = supervisor.clone();
+        let task = tokio::spawn(async move {
+            if let Ok(client) = FleetClient::new(fleet) {
+                run_fleet_loop(client, supervisor, receiver).await;
+            } else {
+                tracing::warn!(
+                    event = "fleet_client_initialization_failed",
+                    "fleet polling stopped"
+                );
+            }
+        });
+        (shutdown, task)
+    });
+    await_local_then_stop_fleet(
+        run(core, cfg.grpc_bind, cfg.rest_bind, auth, cfg.tls),
+        fleet_task,
+    )
+    .await
+}
+
+async fn await_local_then_stop_fleet<F>(
+    local: F,
+    fleet_task: Option<(
+        tokio::sync::watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+    )>,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = anyhow::Result<()>>,
+{
+    await_local_then_stop_fleet_with_timeout(local, fleet_task, Duration::from_secs(1)).await
+}
+
+async fn await_local_then_stop_fleet_with_timeout<F>(
+    local: F,
+    fleet_task: Option<(
+        tokio::sync::watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+    )>,
+    shutdown_timeout: Duration,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = anyhow::Result<()>>,
+{
+    let result = local.await;
+    if let Some((shutdown, mut task)) = fleet_task {
+        let _ = shutdown.send(true);
+        if tokio::time::timeout(shutdown_timeout, &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            tracing::warn!(
+                event = "fleet_task_shutdown_timed_out",
+                "fleet polling stopped"
+            );
+        }
+    }
+    result
 }
 
 #[cfg(test)]
 mod serve_tests {
     use super::*;
+    use std::time::Duration;
 
     fn empty_keys() -> Arc<ApiKeyStore> {
         Arc::new(ApiKeyStore::default())
@@ -326,6 +393,7 @@ mod serve_tests {
             dev_mode: false,
             api_keys: empty_keys(),
             tls: None,
+            fleet: None,
         };
         let err = cfg.guard().expect_err("must reject");
         assert!(
@@ -343,6 +411,7 @@ mod serve_tests {
             dev_mode: true,
             api_keys: empty_keys(),
             tls: None,
+            fleet: None,
         };
         cfg.guard().expect("dev mode passes");
     }
@@ -359,6 +428,7 @@ mod serve_tests {
             dev_mode: true,
             api_keys: empty_keys(),
             tls: None,
+            fleet: None,
         };
         let err = cfg
             .guard()
@@ -378,6 +448,7 @@ mod serve_tests {
             dev_mode: false,
             api_keys: keyed(),
             tls: None,
+            fleet: None,
         };
         // Keys + loopback + no TLS is the allowed "terminate TLS at a proxy"
         // posture: guard accepts (with a plaintext-on-loopback warning).
@@ -393,6 +464,7 @@ mod serve_tests {
             dev_mode: false,
             api_keys: keyed(),
             tls: None,
+            fleet: None,
         };
         let err = cfg
             .guard()
@@ -409,6 +481,7 @@ mod serve_tests {
             dev_mode: false,
             api_keys: keyed(),
             tls: None,
+            fleet: None,
         };
         cfg.guard()
             .expect("loopback plaintext is allowed (with a warning)");
@@ -423,11 +496,65 @@ mod serve_tests {
             dev_mode: false,
             api_keys: keyed(),
             tls: None,
+            fleet: None,
         };
         let err = cfg
             .guard()
             .expect_err("mixed bind (one public) must be refused");
         assert!(err.to_string().contains("non-loopback bind"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn stalled_fleet_task_is_cancelled_before_local_result_returns() {
+        let (shutdown, mut receiver) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = receiver.changed() => {}
+                () = std::future::pending() => {}
+            }
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            await_local_then_stop_fleet(async { Ok(()) }, Some((shutdown, task))),
+        )
+        .await
+        .expect("fleet cancellation is bounded");
+
+        result.expect("local result is retained");
+    }
+
+    #[tokio::test]
+    async fn fleet_task_failure_does_not_replace_the_local_result() {
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            drop(receiver);
+        });
+
+        let err = await_local_then_stop_fleet(
+            async { Err(anyhow::anyhow!("local server ended")) },
+            Some((shutdown, task)),
+        )
+        .await
+        .expect_err("local failure remains authoritative");
+
+        assert_eq!(err.to_string(), "local server ended");
+    }
+
+    #[tokio::test]
+    async fn uncooperative_fleet_task_hits_abort_timeout_without_changing_local_result() {
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            drop(receiver);
+            std::future::pending::<()>().await;
+        });
+        let result = await_local_then_stop_fleet_with_timeout(
+            async { Ok(()) },
+            Some((shutdown, task)),
+            Duration::from_millis(1),
+        )
+        .await;
+        result.expect("local result");
     }
 }
 

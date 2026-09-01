@@ -312,6 +312,7 @@ pub async fn serve(cfg: SupervisorConfig) -> Result<()> {
     } else {
         cfg.max_workspaces
     };
+    let max_workspaces = crate::workspace::validate_workspace_ceiling(max_workspaces)?;
     let max_workspace_mem_mib = if cfg.max_workspace_mem_mib == 0 {
         u32::try_from(host_ram_mib.min(32768)).unwrap_or(u32::MAX)
     } else {
@@ -345,7 +346,7 @@ pub async fn serve(cfg: SupervisorConfig) -> Result<()> {
             },
             audit.clone(),
             attestation,
-            max_workspaces,
+            usize::try_from(max_workspaces).context("convert validated workspace ceiling")?,
             max_workspace_mem_mib,
         )
         .context("construct workspace manager")?,
@@ -417,23 +418,26 @@ pub async fn serve(cfg: SupervisorConfig) -> Result<()> {
         use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
         let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-        tokio::select! {
-            r = server.serve(dispatcher) => {
-                r.context("supervisor IPC server terminated with error")?;
-            }
+        let server_result = tokio::select! {
+            r = server.serve(dispatcher) => r,
             _ = sigterm.recv() => {
-                tracing::info!("SIGTERM received — reaping warm pool");
-                workspaces.shutdown_pool().await;
+                tracing::info!("SIGTERM received — draining lifecycle work");
+                Ok(())
             }
             _ = sigint.recv() => {
-                tracing::info!("SIGINT received — reaping warm pool");
-                workspaces.shutdown_pool().await;
+                tracing::info!("SIGINT received — draining lifecycle work");
+                Ok(())
             }
-        }
+        };
+        // Close before waiting so accepted connections cannot start more work.
+        // Refill is woken by `close_lifecycle`; after all tracked work and
+        // cleanup finish, idle pool members are explicitly reaped.
+        workspaces.shutdown_lifecycle().await;
         // Abort the ingress edge on shutdown (it loops forever until cancelled).
         if let Some(t) = ingress_task {
             t.abort();
         }
+        server_result.context("supervisor IPC server terminated with error")?;
     }
     #[cfg(not(target_os = "linux"))]
     server
@@ -505,5 +509,23 @@ mod tests {
         let mut c = base();
         c.dev_mode = true;
         assert!(matches!(c.resolve_auth().unwrap(), PeerAuth::DevDisabled));
+    }
+
+    #[test]
+    fn resolved_workspace_ceiling_obeys_fleet_wire_limit() {
+        assert_eq!(
+            crate::workspace::validate_workspace_ceiling(1).expect("minimum"),
+            1
+        );
+        assert_eq!(
+            crate::workspace::validate_workspace_ceiling(1_000_000).expect("wire maximum"),
+            1_000_000
+        );
+        assert!(crate::workspace::validate_workspace_ceiling(1_000_001).is_err());
+        if usize::BITS > 32 {
+            let above_u32 = usize::try_from(u64::from(u32::MAX) + 1)
+                .expect("wide pointer targets represent one above u32::MAX");
+            assert!(crate::workspace::validate_workspace_ceiling(above_u32).is_err());
+        }
     }
 }

@@ -12,6 +12,7 @@
 
 pub mod attestation;
 pub mod audit;
+pub mod fleet;
 pub mod guest;
 pub mod profile;
 pub mod snapshot;

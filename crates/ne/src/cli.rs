@@ -95,6 +95,22 @@ pub struct ServeApiArgs {
     /// Path to the server TLS private key (PEM). Required with --tls-cert.
     #[arg(long, env = "NE_TLS_KEY")]
     pub tls_key: Option<PathBuf>,
+
+    /// Optional HTTPS endpoint for fleet polling.
+    #[arg(long, env = "NE_CP_FLEET_ENDPOINT")]
+    pub fleet_endpoint: Option<String>,
+
+    /// PEM certificate authority for fleet endpoint verification.
+    #[arg(long, env = "NE_CP_TLS_CA_CERT")]
+    pub cp_tls_ca_cert: Option<PathBuf>,
+
+    /// PEM client certificate chain for fleet endpoint authentication.
+    #[arg(long, env = "NE_CP_TLS_CLIENT_CERT")]
+    pub cp_tls_client_cert: Option<PathBuf>,
+
+    /// PEM client private key for fleet endpoint authentication.
+    #[arg(long, env = "NE_CP_TLS_CLIENT_KEY")]
+    pub cp_tls_client_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -733,5 +749,35 @@ mod tests {
         };
         let RuntimeCommand::Capabilities { endpoint } = args.command;
         assert_eq!(endpoint, "http://127.0.0.1:50051");
+    }
+
+    #[test]
+    fn serve_api_accepts_optional_fleet_mtls_configuration() {
+        let cli = Cli::try_parse_from([
+            "nee",
+            "serve-api",
+            "--fleet-endpoint",
+            "https://localhost:8443/v1/fleet/poll",
+            "--cp-tls-ca-cert",
+            "ca.pem",
+            "--cp-tls-client-cert",
+            "client.pem",
+            "--cp-tls-client-key",
+            "client-key.pem",
+        ])
+        .expect("parse fleet settings");
+        let Command::ServeApi(args) = cli.command else {
+            panic!("expected API server command");
+        };
+        assert_eq!(
+            args.fleet_endpoint.as_deref(),
+            Some("https://localhost:8443/v1/fleet/poll")
+        );
+        assert_eq!(args.cp_tls_ca_cert, Some(PathBuf::from("ca.pem")));
+        assert_eq!(args.cp_tls_client_cert, Some(PathBuf::from("client.pem")));
+        assert_eq!(
+            args.cp_tls_client_key,
+            Some(PathBuf::from("client-key.pem"))
+        );
     }
 }

@@ -1881,6 +1881,7 @@ dependencies = [
  "prost",
  "rand 0.8.6",
  "rcgen",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -1894,6 +1895,8 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2099,6 +2102,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tonic",
  "tonic-build",
+ "uuid",
 ]
 
 [[package]]
@@ -4106,6 +4110,7 @@ checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

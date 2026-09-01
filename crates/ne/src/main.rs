@@ -63,6 +63,12 @@ async fn main() -> Result<()> {
                     anyhow::bail!("--tls-key was given without --tls-cert (both are required)")
                 }
             };
+            let fleet = ne_api::fleet_client::FleetClientConfig::from_optional(
+                a.fleet_endpoint,
+                a.cp_tls_ca_cert,
+                a.cp_tls_client_cert,
+                a.cp_tls_client_key,
+            )?;
             ne_api::serve(ne_api::ApiConfig {
                 grpc_bind: a.bind,
                 rest_bind: a.rest_bind,
@@ -70,6 +76,7 @@ async fn main() -> Result<()> {
                 dev_mode: a.dev_mode,
                 api_keys,
                 tls,
+                fleet,
             })
             .await
         }
