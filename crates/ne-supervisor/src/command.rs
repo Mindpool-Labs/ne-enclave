@@ -67,7 +67,7 @@ impl Dispatcher {
                     ne_protocol::attestation::PUBLIC_EVIDENCE_SCHEMA_VERSION,
                 ))
             }
-            SupervisorRequest::CreateWorkspace(req) => self.workspaces.create(req).await,
+            SupervisorRequest::CreateWorkspace(req) => Box::pin(self.workspaces.create(req)).await,
             SupervisorRequest::Terminate(req) => self.workspaces.terminate(req).await,
             SupervisorRequest::RunCommand(req) => self.workspaces.run_command(req).await,
             SupervisorRequest::WriteFile(req) => self.workspaces.write_file(req).await,
@@ -86,7 +86,7 @@ impl Dispatcher {
             SupervisorRequest::ResumeWorkspace(r) => self.workspaces.resume(r).await,
             SupervisorRequest::SnapshotWorkspace(r) => self.workspaces.snapshot(r).await,
             SupervisorRequest::RestoreWorkspace(r) => self.workspaces.restore(r).await,
-            SupervisorRequest::ForkWorkspace(r) => self.workspaces.fork(r).await,
+            SupervisorRequest::ForkWorkspace(r) => Box::pin(self.workspaces.fork(r)).await,
             SupervisorRequest::PoolStatus(r) => self.workspaces.pool_status(r).await,
             SupervisorRequest::CapacitySnapshot(_) => self.workspaces.capacity_snapshot(),
             SupervisorRequest::ExposePort(r) => self.workspaces.expose_port(r).await,

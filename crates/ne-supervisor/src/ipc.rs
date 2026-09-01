@@ -115,7 +115,7 @@ impl IpcServer {
             let dispatcher = Arc::clone(&dispatcher);
             let auth = self.auth;
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, auth, dispatcher).await {
+                if let Err(e) = Box::pin(handle_connection(stream, auth, dispatcher)).await {
                     if matches!(e.kind(), ErrorKind::UnexpectedEof | ErrorKind::BrokenPipe) {
                         debug!(error = %e, "supervisor IPC peer disconnected");
                     } else {
@@ -165,7 +165,7 @@ async fn handle_connection(
             break;
         }
         let resp = match serde_json::from_str::<SupervisorRequest>(line.trim_end()) {
-            Ok(req) => dispatcher.dispatch(req).await,
+            Ok(req) => Box::pin(dispatcher.dispatch(req)).await,
             Err(e) => SupervisorResponse::Error {
                 kind: SupervisorErrorKind::InvalidRequest,
                 message: e.to_string(),

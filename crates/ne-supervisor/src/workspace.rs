@@ -161,12 +161,16 @@ impl PendingCapacityOwner {
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 enum PendingNetworkCleanup {
-    Controller {
-        controller: NetworkController,
-        slot: NetworkSlot,
-    },
+    Controller(Box<PendingNetworkControllerCleanup>),
     #[cfg(test)]
     Probe(PendingNetworkCleanupProbe),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PendingNetworkControllerCleanup {
+    controller: NetworkController,
+    slot: NetworkSlot,
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -182,8 +186,8 @@ struct PendingNetworkCleanupProbe {
 impl PendingNetworkCleanup {
     async fn teardown(self) {
         match self {
-            Self::Controller { controller, slot } => {
-                if let Err(error) = controller.teardown(slot).await {
+            Self::Controller(cleanup) => {
+                if let Err(error) = cleanup.controller.teardown(cleanup.slot).await {
                     warn!(%error, "pending workspace network teardown failed");
                 }
             }
@@ -199,8 +203,7 @@ impl PendingNetworkCleanup {
                 let registered = probe
                     .ledger
                     .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
-                    .map(|snapshot| snapshot.registered_workspaces == 1)
-                    .unwrap_or(false);
+                    .is_ok_and(|snapshot| snapshot.registered_workspaces == 1);
                 assert!(exited && !probe.jailer_root.exists() && registered);
                 probe
                     .completed
@@ -694,18 +697,20 @@ impl WorkspaceManager {
         workspace_id: &str,
         vcpu_count: u8,
         mem_size_mib: u32,
-    ) -> Result<WorkspaceCapacityReservation, SupervisorResponse> {
+    ) -> Result<WorkspaceCapacityReservation, Box<SupervisorResponse>> {
         let (cpu_millicores, memory_bytes) =
             capacity_dimensions(u64::from(vcpu_count), u64::from(mem_size_mib))
-                .map_err(|error| capacity_error_response(&error.to_string()))?;
+                .map_err(|error| Box::new(capacity_error_response(&error.to_string())))?;
         self.capacity
             .reserve_workspace(workspace_id, cpu_millicores, memory_bytes)
-            .map_err(|error| match error {
-                crate::capacity::CapacityError::Exhausted => SupervisorResponse::Error {
-                    kind: SupervisorErrorKind::CapacityExceeded,
-                    message: "workspace capacity is exhausted".to_string(),
-                },
-                _ => capacity_error_response(&error.to_string()),
+            .map_err(|error| {
+                Box::new(match error {
+                    crate::capacity::CapacityError::Exhausted => SupervisorResponse::Error {
+                        kind: SupervisorErrorKind::CapacityExceeded,
+                        message: "workspace capacity is exhausted".to_string(),
+                    },
+                    _ => capacity_error_response(&error.to_string()),
+                })
             })
     }
 
@@ -714,7 +719,7 @@ impl WorkspaceManager {
     fn register_instance_capacity(
         &self,
         instance: &crate::firecracker::Instance,
-    ) -> Result<RegisteredWorkspaceCapacityGuard, SupervisorResponse> {
+    ) -> Result<RegisteredWorkspaceCapacityGuard, Box<SupervisorResponse>> {
         self.reserve_workspace_capacity(
             &instance.workspace_id,
             instance.vcpu_count,
@@ -723,7 +728,7 @@ impl WorkspaceManager {
         .and_then(|reservation| {
             reservation
                 .register(instance.lifecycle_state)
-                .map_err(|error| capacity_error_response(&error.to_string()))
+                .map_err(|error| Box::new(capacity_error_response(&error.to_string())))
         })
     }
 
@@ -759,8 +764,9 @@ impl WorkspaceManager {
     where
         F: Future<Output = Result<T, SupervisorResponse>>,
     {
-        let reservation =
-            self.reserve_workspace_capacity(workspace_id, vcpu_count, mem_size_mib)?;
+        let reservation = self
+            .reserve_workspace_capacity(workspace_id, vcpu_count, mem_size_mib)
+            .map_err(|error| *error)?;
         let output = boot.await?;
         Ok((output, reservation))
     }
@@ -1565,8 +1571,10 @@ impl WorkspaceManager {
     /// register it under the caller-supplied `workspace_id`.
     pub async fn create(self: &Arc<Self>, req: CreateWorkspaceRequest) -> SupervisorResponse {
         let manager = Arc::clone(self);
-        self.run_tracked_lifecycle(async move { manager.create_inner(req).await })
-            .await
+        Box::pin(
+            self.run_tracked_lifecycle(async move { Box::pin(manager.create_inner(req)).await }),
+        )
+        .await
     }
 
     async fn create_inner(&self, req: CreateWorkspaceRequest) -> SupervisorResponse {
@@ -1633,7 +1641,7 @@ impl WorkspaceManager {
         // ready-pool ledger guard into the registry without a new reservation.
         // A miss obtains its own ledger reservation before it can boot.
         if req.tier.is_some() {
-            return self.create_from_pool(req).await;
+            return Box::pin(self.create_from_pool(req)).await;
         }
 
         if both_empty {
@@ -1658,7 +1666,7 @@ impl WorkspaceManager {
             req.mem_size_mib,
         ) {
             Ok(reservation) => reservation,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
 
         // Resolve and verify both images before allocating a network slot or
@@ -1775,9 +1783,10 @@ impl WorkspaceManager {
                     .network_slot
                     .clone()
                     .zip(self.cfg.network.clone())
-                    .map(|(slot, controller)| PendingNetworkCleanup::Controller {
-                        controller,
-                        slot,
+                    .map(|(slot, controller)| {
+                        PendingNetworkCleanup::Controller(Box::new(
+                            PendingNetworkControllerCleanup { controller, slot },
+                        ))
                     });
                 // From this point the launched child and its reservation are
                 // one cancellation-safe owner, including the audit await.
@@ -2078,7 +2087,7 @@ impl WorkspaceManager {
                     let Some(instance) = member.instance_mut() else {
                         continue;
                     };
-                    instance.workspace_id = req.workspace_id.clone();
+                    instance.workspace_id.clone_from(&req.workspace_id);
                     adopted = Some(member);
                     break;
                 }
@@ -2807,12 +2816,11 @@ impl WorkspaceManager {
     // re-becomes async when the API is restored.
     #[allow(clippy::unused_async)]
     pub async fn pause(self: &Arc<Self>, ws_ref: WorkspaceRef) -> SupervisorResponse {
-        let manager = Arc::clone(self);
-        self.run_tracked_lifecycle(async move { manager.pause_inner(ws_ref).await })
+        self.run_tracked_lifecycle(async move { Self::pause_inner(ws_ref) })
             .await
     }
 
-    async fn pause_inner(&self, ws_ref: WorkspaceRef) -> SupervisorResponse {
+    fn pause_inner(ws_ref: WorkspaceRef) -> SupervisorResponse {
         let _ = &ws_ref;
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
@@ -2826,12 +2834,11 @@ impl WorkspaceManager {
     /// DEFERRED: see [`Self::pause`].
     #[allow(clippy::unused_async)]
     pub async fn resume(self: &Arc<Self>, ws_ref: WorkspaceRef) -> SupervisorResponse {
-        let manager = Arc::clone(self);
-        self.run_tracked_lifecycle(async move { manager.resume_inner(ws_ref).await })
+        self.run_tracked_lifecycle(async move { Self::resume_inner(ws_ref) })
             .await
     }
 
-    async fn resume_inner(&self, ws_ref: WorkspaceRef) -> SupervisorResponse {
+    fn resume_inner(ws_ref: WorkspaceRef) -> SupervisorResponse {
         let _ = &ws_ref;
         SupervisorResponse::Error {
             kind: SupervisorErrorKind::Unsupported,
@@ -4236,7 +4243,7 @@ impl WorkspaceManager {
     /// is torn down and `ForkFailed` is returned.
     pub async fn fork(self: &Arc<Self>, req: ForkRequest) -> SupervisorResponse {
         let manager = Arc::clone(self);
-        self.run_tracked_lifecycle(async move { manager.fork_inner(req).await })
+        Box::pin(self.run_tracked_lifecycle(async move { Box::pin(manager.fork_inner(req)).await }))
             .await
     }
 
@@ -4948,9 +4955,7 @@ mod tests {
         )
     }
 
-    async fn pending_test_instance(
-        temp: &tempfile::TempDir,
-    ) -> (crate::firecracker::Instance, u32) {
+    fn pending_test_instance(temp: &tempfile::TempDir) -> (crate::firecracker::Instance, u32) {
         let jailer_root = temp.path().join("jailer");
         std::fs::create_dir_all(jailer_root.join("root")).expect("test chroot");
         let child = tokio::process::Command::new("sleep")
@@ -4996,7 +5001,7 @@ mod tests {
             .await
             .expect("pool reservation");
         let permit = permits.into_iter().next().expect("one permit");
-        let (instance, _pid) = pending_test_instance(&temp).await;
+        let (instance, _pid) = pending_test_instance(&temp);
         pool.complete_provision(instance, permit)
             .await
             .expect("ready member");
@@ -5102,7 +5107,7 @@ mod tests {
     async fn cancellation_waiting_for_pending_registry_transfer_reaps_before_release() {
         let temp = tempfile::tempdir().expect("tempdir");
         let manager = test_manager_with_limits(1, 32768).await;
-        let (instance, pid) = pending_test_instance(&temp).await;
+        let (instance, pid) = pending_test_instance(&temp);
         let network_cleanup = Arc::new(AtomicUsize::new(0));
         let capacity_guard = manager
             .capacity
@@ -5147,12 +5152,11 @@ mod tests {
                 let released = manager
                     .capacity
                     .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
-                    .map(|snapshot| {
+                    .is_ok_and(|snapshot| {
                         snapshot.registered_workspaces == 0
                             && snapshot.resident_workspaces == 0
                             && snapshot.runnable_workspaces == 0
-                    })
-                    .unwrap_or(false);
+                    });
                 if exited
                     && !temp.path().join("jailer").exists()
                     && network_cleanup.load(Ordering::Acquire) == 1
@@ -5174,7 +5178,7 @@ mod tests {
     async fn tracked_raw_instance_survives_waiter_abort_and_shutdown_drain() {
         let temp = tempfile::tempdir().expect("tempdir");
         let manager = test_manager_with_limits(1, 32768).await;
-        let (instance, pid) = pending_test_instance(&temp).await;
+        let (instance, pid) = pending_test_instance(&temp);
         let reservation = manager
             .capacity
             .reserve_workspace("raw-gated", 1_000, 1_024)
@@ -5234,10 +5238,9 @@ mod tests {
                 let released = manager
                     .capacity
                     .snapshot(ne_protocol::profile::ExecutionProfile::Standard)
-                    .map(|snapshot| {
+                    .is_ok_and(|snapshot| {
                         snapshot.registered_workspaces == 0 && snapshot.resident_workspaces == 0
-                    })
-                    .unwrap_or(false);
+                    });
                 if exited && !temp.path().join("jailer").exists() && released {
                     return;
                 }
@@ -5254,7 +5257,7 @@ mod tests {
     async fn pending_reserved_registration_fault_reaps_before_fail_closed_capacity() {
         let temp = tempfile::tempdir().expect("tempdir");
         let manager = test_manager_with_limits(1, 32768).await;
-        let (instance, pid) = pending_test_instance(&temp).await;
+        let (instance, pid) = pending_test_instance(&temp);
         let reservation = manager
             .capacity
             .reserve_workspace("pending-registration-fault", 1_000, 1_024)

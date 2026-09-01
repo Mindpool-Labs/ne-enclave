@@ -129,18 +129,15 @@ impl WarmPool {
         member: Instance,
         mut permit: ProvisionPermit,
     ) -> Result<(), RejectedPoolProvision> {
-        let (cpu_millicores, memory_bytes) =
-            match capacity_dimensions(u64::from(member.vcpu_count), u64::from(member.mem_size_mib))
-            {
-                Ok(dimensions) => dimensions,
-                Err(_) => {
-                    return Err(RejectedPoolProvision::new(
-                        member,
-                        permit,
-                        PoolCompletionError::DimensionMismatch,
-                    ));
-                }
-            };
+        let Ok((cpu_millicores, memory_bytes)) =
+            capacity_dimensions(u64::from(member.vcpu_count), u64::from(member.mem_size_mib))
+        else {
+            return Err(RejectedPoolProvision::new(
+                member,
+                permit,
+                PoolCompletionError::DimensionMismatch,
+            ));
+        };
         if cpu_millicores != permit.cpu_millicores || memory_bytes != permit.memory_bytes {
             return Err(RejectedPoolProvision::new(
                 member,
@@ -148,15 +145,12 @@ impl WarmPool {
                 PoolCompletionError::DimensionMismatch,
             ));
         }
-        let capacity = match permit.capacity.as_mut() {
-            Some(capacity) => capacity,
-            None => {
-                return Err(RejectedPoolProvision::new(
-                    member,
-                    permit,
-                    PoolCompletionError::MissingPermit,
-                ));
-            }
+        let Some(capacity) = permit.capacity.as_mut() else {
+            return Err(RejectedPoolProvision::new(
+                member,
+                permit,
+                PoolCompletionError::MissingPermit,
+            ));
         };
         let guard = match capacity.ready_in_place() {
             Ok(guard) => guard,
@@ -171,7 +165,9 @@ impl WarmPool {
         let _ = permit.capacity.take();
         let member = PoolMember::new(member, guard, Arc::clone(&self.lifecycle_tasks));
         #[cfg(test)]
-        if let Some(waiting) = self.push_waiting.lock().await.clone() {
+        let waiting = self.push_waiting.lock().await.clone();
+        #[cfg(test)]
+        if let Some(waiting) = waiting {
             waiting.notify_one();
         }
         self.members.lock().await.push_back(member);
@@ -433,7 +429,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    async fn long_running_instance(temp: &tempfile::TempDir, id: &str) -> (Instance, u32) {
+    fn long_running_instance(temp: &tempfile::TempDir, id: &str) -> (Instance, u32) {
         let jailer_root = temp.path().join("jailer");
         std::fs::create_dir_all(jailer_root.join("root")).expect("test chroot");
         let child = tokio::process::Command::new("sleep")
@@ -483,8 +479,7 @@ mod tests {
                 );
                 let released = ledger
                     .snapshot(ExecutionProfile::Standard)
-                    .map(|snapshot| snapshot.warm_pool_reserved_slots == 0)
-                    .unwrap_or(false);
+                    .is_ok_and(|snapshot| snapshot.warm_pool_reserved_slots == 0);
                 if exited && !jailer_root.exists() && released && pool.counts().await.1 == 0 {
                     return;
                 }
@@ -741,7 +736,7 @@ mod tests {
             .expect("permit")
             .pop()
             .expect("one permit");
-        let (instance, pid) = long_running_instance(&temp, "push-cancel").await;
+        let (instance, pid) = long_running_instance(&temp, "push-cancel");
         let waiting = Arc::new(tokio::sync::Notify::new());
         pool.set_push_waiting_hook(Arc::clone(&waiting)).await;
         let queue_lock = pool.members.lock().await;
@@ -768,7 +763,7 @@ mod tests {
             .expect("permit")
             .pop()
             .expect("one permit");
-        let (instance, pid) = long_running_instance(&temp, "pop-cancel").await;
+        let (instance, pid) = long_running_instance(&temp, "pop-cancel");
         pool.complete_provision(instance, permit)
             .await
             .expect("ready member");

@@ -767,10 +767,9 @@ pub async fn terminate(mut instance: Instance, grace: Duration) -> Result<(), Te
     #[cfg(test)]
     let injected = INJECT_CHILD_CONTROL_FAILURES
         .lock()
-        .map(|mut targets| {
+        .is_ok_and(|mut targets| {
             targets.remove(&(instance.workspace_id.clone(), instance.boot_id.clone()))
-        })
-        .unwrap_or(false);
+        });
     #[cfg(test)]
     if injected {
         return Err(TerminateError::new(
